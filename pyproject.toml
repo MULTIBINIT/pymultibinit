@@ -1,0 +1,18 @@
+[project]
+name = "pymultibinit"
+version = "0.2.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Xu He", email = "mailhexu@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "ase>=3.26.0",
+    "cffi>=2.0.0",
+    "numpy>=2.2.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

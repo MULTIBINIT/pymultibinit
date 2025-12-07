@@ -1,0 +1,92 @@
+#---------------------------------------------------------------
+# MULTIBINIT Input File for BaTiO3
+#---------------------------------------------------------------
+# This is an example input file (.abi) for running MULTIBINIT
+# calculations on BaTiO3 using an effective Hamiltonian.
+#
+# This file contains parameters for:
+# - DDB file specification and Q-point grid
+# - Supercell construction
+# - Molecular dynamics settings (optional)
+#
+# For Python interface, you typically don't need the MD parameters
+# since pymultibinit focuses on single-point energy/force calculations.
+
+#---------------------------------------------------------------
+# Information about the DDB and potential
+#---------------------------------------------------------------
+# Q-point grid used when generating the DDB file
+# Must match the grid used in the DFPT calculation
+ngqpt = 4 4 4
+
+# Recompute dipole-dipole interactions (1=yes, 0=no)
+# Important for polar materials like BaTiO3
+dipdip = 1
+
+#---------------------------------------------------------------
+# Supercell construction
+#---------------------------------------------------------------
+# Size of the supercell for the simulation
+# This creates a ncell[0] x ncell[1] x ncell[2] supercell
+# from the primitive cell
+#
+# For BaTiO3 (5 atoms/cell): 2x2x2 = 8 cells = 40 atoms total
+ncell = 2 2 2
+
+#---------------------------------------------------------------
+# Molecular Dynamics Parameters (Optional)
+#---------------------------------------------------------------
+# These are only needed if running MD within MULTIBINIT itself.
+# When using pymultibinit for energy/force evaluation, you can
+# omit these or set dynamics = 0
+
+# Molecular dynamics flag
+# 0 = no MD (just potential evaluation)
+# 13 = NPT ensemble with hybrid Monte Carlo
+# 25 = Other MD schemes (see MULTIBINIT docs)
+dynamics = 0
+
+# Temperature in Kelvin (if running MD)
+temperature = 300
+
+# Number of MD timesteps (if running MD)
+ntime = 0
+
+# Timestep in atomic time units (if running MD)
+# 1 a.t.u. = 2.42e-17 seconds
+# Typical value: 30-100 a.t.u. = 0.73-2.42 fs
+dtion = 50
+
+#---------------------------------------------------------------
+# Notes for Python interface usage:
+#---------------------------------------------------------------
+# When using pymultibinit.MultibinitPotential.from_abi(), 
+# you primarily need:
+#   - ngqpt: Q-point grid
+#   - dipdip: Dipole-dipole flag
+#   - ncell: Supercell dimensions
+#
+# The MD parameters (dynamics, temperature, ntime, etc.) are
+# typically ignored when using pymultibinit for energy/force
+# evaluation in Python-driven simulations (ASE MD, optimization, etc.)
+
+#---------------------------------------------------------------
+# File references (specified in Python or config file):
+#---------------------------------------------------------------
+# In the .abi file, you don't specify file paths directly.
+# Instead, provide them when calling MULTIBINIT or pymultibinit:
+#
+# Python example:
+#   pot = MultibinitPotential.from_abi(
+#       abi_file="BaTiO3.abi",
+#       lib_path="/path/to/libabinit.so"  # optional
+#   )
+#
+# Or use from_params() without .abi file:
+#   pot = MultibinitPotential.from_params(
+#       ddb_file="BaTiO3_DDB",
+#       sys_file="BaTiO3.xml",
+#       ncell=(2, 2, 2),
+#       ngqpt=(4, 4, 4),
+#       dipdip=1
+#   )

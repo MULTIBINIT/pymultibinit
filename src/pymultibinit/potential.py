@@ -1,0 +1,543 @@
+"""
+High-level Python API for MULTIBINIT effective potential.
+
+This module provides user-friendly classes that wrap the C API and handle
+unit conversions automatically.
+
+Uses CFFI backend for optimal performance.
+"""
+import numpy as np
+from typing import Optional, Tuple, Literal
+import warnings
+from .atom_matching import (
+    find_atom_mapping_pbc,
+    apply_mapping_to_positions,
+    apply_inverse_mapping_to_forces,
+    validate_mapping,
+    get_reference_structure_info
+)
+
+# Unit conversion constants
+BOHR_TO_ANGSTROM = 0.529177210903
+ANGSTROM_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM
+HARTREE_TO_EV = 27.211386245988
+EV_TO_HARTREE = 1.0 / HARTREE_TO_EV
+
+
+class MultibinitPotential:
+    """
+    High-level interface to MULTIBINIT effective potential.
+    
+    Supports two initialization modes:
+    1. from_abi(): Load from a .abi input file (standard MULTIBINIT format)
+    2. from_params(): Direct initialization without .abi file
+    
+    By default, uses Angstrom and eV for I/O (matching ASE conventions).
+    Set use_atomic_units=True to work directly in Bohr and Hartree.
+    
+    Example:
+        >>> # Using .abi file
+        >>> pot = MultibinitPotential.from_abi("input.abi")
+        >>> energy, forces, stress = pot.evaluate(positions_ang, lattice_ang)
+        
+        >>> # Using parameters
+        >>> pot = MultibinitPotential.from_params(
+        ...     ddb_file="system_DDB",
+        ...     sys_file="system.xml",
+        ...     ncell=(2, 2, 2)
+        ... )
+        >>> energy, forces, stress = pot.evaluate(positions_ang, lattice_ang)
+    """
+    def __init__(self, lib_path: Optional[str] = None, 
+                 use_atomic_units: bool = False,
+                 auto_match_atoms: bool = True,
+                 match_tolerance: float = 0.1):
+        """
+        Initialize the potential object.
+        
+        Args:
+            lib_path: Path to libabinit.so/dylib (optional)
+            use_atomic_units: If True, I/O in Bohr/Hartree. If False, Angstrom/eV.
+            auto_match_atoms: If True, automatically match and reorder atoms on first evaluate()
+            match_tolerance: Maximum distance for atom matching (in Angstrom or Bohr depending on use_atomic_units)
+        """
+        from .wrapper_cffi import MultibinitWrapperCFFI
+        self.wrapper = MultibinitWrapperCFFI(lib_path=lib_path)
+        self.use_atomic_units = use_atomic_units
+        self._initialized = False
+        
+        # Atom matching configuration
+        self.auto_match_atoms = auto_match_atoms
+        self.match_tolerance = match_tolerance
+        
+        # Persistent mapping storage
+        self._atom_mapping: Optional[np.ndarray] = None  # Forward mapping: ref[i] = input[mapping[i]]
+        self._inverse_mapping: Optional[np.ndarray] = None  # Inverse: input[j] -> ref atom index
+        self._reference_positions: Optional[np.ndarray] = None  # Reference structure positions
+        self._reference_lattice: Optional[np.ndarray] = None  # Reference lattice
+        self._mapping_validated = False
+        self._is_identity_mapping = False  # Flag to skip force remapping when no reordering needed
+    
+    @property
+    def natoms(self) -> int:
+        """
+        Number of atoms in the supercell.
+        
+        Returns:
+            int: Number of atoms, or 0 if unknown (reference structure not set).
+        """
+        if self._reference_positions is not None:
+            return len(self._reference_positions)
+        return 0
+        
+    @property
+    def supercell(self) -> Optional[Tuple[int, int, int]]:
+        """
+        Get supercell dimensions if known (from DDB or user input).
+        Note: This is not stored directly in the potential object currently,
+        unless we store 'ncell' from initialization.
+        """
+        # TODO: Store ncell in __init__ to return it here
+        return None
+
+    @classmethod
+    def from_abi(cls, abi_file: str, lib_path: Optional[str] = None, 
+                 use_atomic_units: bool = False) -> 'MultibinitPotential':
+        """
+        Create potential from a .abi input file.
+        
+        Args:
+            abi_file: Path to the .abi input file
+            lib_path: Path to libabinit.so/dylib (optional)
+            use_atomic_units: If True, I/O in Bohr/Hartree. If False, Angstrom/eV.
+            
+        Returns:
+            Initialized MultibinitPotential instance
+        """
+        pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
+        pot.wrapper.init_from_abi_file(abi_file)
+        pot._initialized = True
+        return pot
+    
+    @classmethod
+    def from_params(cls, ddb_file: str, sys_file: str = "", coeff_file: str = "",
+                   ncell: Tuple[int, int, int] = (1, 1, 1),
+                   ngqpt: Tuple[int, int, int] = (1, 1, 1),
+                   dipdip: int = 1,
+                   lib_path: Optional[str] = None,
+                   use_atomic_units: bool = False) -> 'MultibinitPotential':
+        """
+        Create potential from direct parameters (no .abi file).
+        
+        Args:
+            ddb_file: Path to DDB file
+            sys_file: Path to system XML file (optional)
+            coeff_file: Path to coefficient XML file (optional)
+            ncell: Supercell dimensions [nx, ny, nz]
+            ngqpt: q-point grid [nqx, nqy, nqz]
+            dipdip: Dipole-dipole interactions (0=off, 1=on)
+            lib_path: Path to libabinit.so/dylib (optional)
+            use_atomic_units: If True, I/O in Bohr/Hartree. If False, Angstrom/eV.
+            
+        Returns:
+            Initialized MultibinitPotential instance
+        """
+        pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
+        pot.wrapper.init_from_params(
+            ddb_file=ddb_file,
+            sys_file=sys_file,
+            coeff_file=coeff_file,
+            ncell=ncell,
+            ngqpt=ngqpt,
+            dipdip=dipdip
+        )
+        pot._initialized = True
+        return pot
+    
+    @classmethod
+    def from_config_file(cls, config_file: str) -> 'MultibinitPotential':
+        """
+        Create potential from a configuration file.
+        
+        The configuration file can specify either:
+        1. abi_file: Path to .abi input file (standard MULTIBINIT format)
+        2. ddb_file + sys_file: Direct initialization without .abi file
+        
+        Simple format example:
+            ```
+            ddb_file: system_DDB
+            sys_file: system.xml
+            ncell: 2 2 2
+            ```
+        
+        INI-like format example:
+            ```
+            [files]
+            ddb_file = system_DDB
+            sys_file = system.xml
+            
+            [parameters]
+            ncell = 2 2 2
+            ngqpt = 4 4 4
+            dipdip = 1
+            ```
+        
+        Args:
+            config_file: Path to the configuration file
+            
+        Returns:
+            Initialized MultibinitPotential instance
+            
+        Raises:
+            FileNotFoundError: If config file doesn't exist
+            ValueError: If required parameters are missing or invalid
+        """
+        from .config import MultibinitConfig
+        
+        config = MultibinitConfig.from_file(config_file)
+        
+        # Determine initialization mode
+        if config.is_abi_mode():
+            # Use .abi file
+            pot = cls.from_abi(
+                abi_file=config.abi_file,
+                lib_path=config.lib_path,
+                use_atomic_units=config.use_atomic_units
+            )
+        else:
+            # Use parameters
+            pot = cls.from_params(
+                ddb_file=config.ddb_file,
+                sys_file=config.sys_file,
+                coeff_file=config.coeff_file,
+                ncell=config.ncell,
+                ngqpt=config.ngqpt,
+                dipdip=config.dipdip,
+                lib_path=config.lib_path,
+                use_atomic_units=config.use_atomic_units
+            )
+        
+        # Apply atom matching configuration
+        pot.auto_match_atoms = config.auto_match_atoms
+        pot.match_tolerance = config.match_tolerance
+        
+        return pot
+    
+    def set_reference_structure(self, positions: np.ndarray, lattice: np.ndarray):
+        """
+        Set the reference structure for atom matching.
+        
+        This should be called with the MULTIBINIT internal supercell structure.
+        If not called, the first structure passed to evaluate() will be used as reference.
+        
+        Args:
+            positions: Reference atomic positions, shape (natom, 3)
+            lattice: Reference lattice vectors, shape (3, 3)
+        """
+        self._reference_positions = np.array(positions, dtype=np.float64)
+        self._reference_lattice = np.array(lattice, dtype=np.float64)
+        self._mapping_validated = False
+        
+        # Clear any existing mapping
+        self._atom_mapping = None
+        self._inverse_mapping = None
+        self._is_identity_mapping = False
+    
+    def compute_atom_mapping(self, positions: np.ndarray, lattice: np.ndarray, 
+                            tolerance: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute atom mapping between input structure and reference.
+        
+        The mapping is stored internally and reused for subsequent evaluations.
+        
+        Args:
+            positions: Input atomic positions, shape (natom, 3)
+            lattice: Input lattice vectors, shape (3, 3)
+            tolerance: Maximum distance for matching (uses self.match_tolerance if None)
+            
+        Returns:
+            tuple: (mapping, inverse_mapping)
+                - mapping[i] = j means reference atom i matches input atom j
+                - inverse_mapping[j] = i means input atom j corresponds to reference atom i
+                
+        Raises:
+            RuntimeError: If reference structure not set
+        """
+        if self._reference_positions is None:
+            raise RuntimeError("Reference structure not set. Call set_reference_structure() first.")
+        
+        if tolerance is None:
+            tolerance = self.match_tolerance
+        
+        mapping, inverse_mapping = find_atom_mapping_pbc(
+            positions_input=positions,
+            positions_ref=self._reference_positions,
+            lattice=lattice,
+            tolerance=tolerance
+        )
+        
+        # Store mapping for reuse
+        self._atom_mapping = mapping
+        self._inverse_mapping = inverse_mapping
+        self._mapping_validated = True
+        
+        # Check if this is identity mapping with no PBC shifts
+        from .atom_matching import is_identity_mapping_no_pbc_shift
+        self._is_identity_mapping = is_identity_mapping_no_pbc_shift(
+            positions, self._reference_positions, mapping, lattice, tolerance=1e-6
+        )
+        
+        return mapping, inverse_mapping
+    
+    def clear_atom_mapping(self):
+        """Clear stored atom mapping. Next evaluate() will recompute if auto_match_atoms=True."""
+        self._atom_mapping = None
+        self._inverse_mapping = None
+        self._mapping_validated = False
+        self._is_identity_mapping = False
+    
+    def get_atom_mapping(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Get the currently stored atom mapping.
+        
+        Returns:
+            tuple or None: (mapping, inverse_mapping) if mapping exists, None otherwise
+        """
+        if self._atom_mapping is not None and self._inverse_mapping is not None:
+            return self._atom_mapping.copy(), self._inverse_mapping.copy()
+        return None
+    
+    def evaluate(self, positions: np.ndarray, lattice: np.ndarray, 
+                skip_atom_matching: bool = False) -> Tuple[float, np.ndarray, np.ndarray]:
+        """
+        Evaluate energy, forces, and stresses.
+        
+        If auto_match_atoms=True (default), automatically matches and reorders atoms
+        on the first call, then reuses the mapping for subsequent calls.
+        
+        Args:
+            positions: Atomic positions, shape (natom, 3)
+                      In Angstrom if use_atomic_units=False, Bohr if True
+            lattice: Lattice vectors (row vectors), shape (3, 3)
+                    In Angstrom if use_atomic_units=False, Bohr if True
+            skip_atom_matching: If True, skip atom matching even if auto_match_atoms=True.
+                               Use this if you're certain atoms are already in correct order.
+            
+        Returns:
+            tuple: (energy, forces, stress)
+                   - energy: float (eV or Hartree)
+                   - forces: array shape (natom, 3) in INPUT atom order (eV/Angstrom or Hartree/Bohr)
+                   - stress: array shape (6,) Voigt order (eV/Angstrom^3 or Hartree/Bohr^3)
+                   
+        Raises:
+            RuntimeError: If not initialized or if atom matching fails
+            
+        Notes:
+            - Forces are automatically mapped back to the input atom order
+            - The atom mapping is computed once and reused for efficiency
+            - Call clear_atom_mapping() to reset if structure changes significantly
+        """
+        if not self._initialized:
+            raise RuntimeError("Potential not initialized. Use from_abi() or from_params().")
+        
+        # Handle atom matching
+        positions_for_eval = positions
+        need_force_remapping = False
+        
+        if self.auto_match_atoms and not skip_atom_matching:
+            # Set reference on first call
+            if self._reference_positions is None:
+                self._reference_positions = np.array(positions, dtype=np.float64)
+                self._reference_lattice = np.array(lattice, dtype=np.float64)
+                self._mapping_validated = True
+                self._is_identity_mapping = True  # First call is always identity
+                warnings.warn(
+                    "Using first input structure as reference for atom matching. "
+                    "If this is not the MULTIBINIT internal supercell, call "
+                    "set_reference_structure() with the correct reference.",
+                    RuntimeWarning
+                )
+            
+            # Compute or reuse mapping
+            if self._atom_mapping is None:
+                try:
+                    self.compute_atom_mapping(positions, lattice)
+                    
+                    # Check if reordering or PBC shifting is needed
+                    if not self._is_identity_mapping:
+                        if self._atom_mapping is not None and not np.array_equal(self._atom_mapping, np.arange(len(positions))):
+                            warnings.warn(
+                                f"Atom ordering differs from reference. Automatically reordering "
+                                f"{len(positions)} atoms. Forces will be mapped back to input order.",
+                                RuntimeWarning
+                            )
+                        need_force_remapping = True
+                    
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Atom matching failed: {e}\n"
+                        f"Set auto_match_atoms=False if you're certain atoms are in correct order, "
+                        f"or call set_reference_structure() with the MULTIBINIT internal supercell."
+                    ) from e
+            else:
+                # Reuse stored mapping - use cached identity flag
+                need_force_remapping = not self._is_identity_mapping
+            
+            # Reorder positions if needed (skip if identity mapping with no PBC shift)
+            if need_force_remapping and self._atom_mapping is not None:
+                positions_for_eval = apply_mapping_to_positions(positions, self._atom_mapping)
+        
+        # Convert to atomic units if needed
+        if self.use_atomic_units:
+            pos_bohr = positions_for_eval
+            lat_bohr = lattice
+        else:
+            pos_bohr = positions_for_eval * ANGSTROM_TO_BOHR
+            lat_bohr = lattice * ANGSTROM_TO_BOHR
+        
+        # Call C API (always in atomic units)
+        energy_ha, forces_ha_bohr, stress_ha_bohr3 = self.wrapper.evaluate(pos_bohr, lat_bohr)
+        
+        # Map forces back to input order if needed
+        # Skip if identity mapping (optimization)
+        if need_force_remapping and self._inverse_mapping is not None:
+            forces_ha_bohr = apply_inverse_mapping_to_forces(forces_ha_bohr, self._inverse_mapping)
+        
+        # Convert back if needed
+        if self.use_atomic_units:
+            return energy_ha, forces_ha_bohr, stress_ha_bohr3
+        else:
+            energy_ev = energy_ha * HARTREE_TO_EV
+            forces_ev_ang = forces_ha_bohr * (HARTREE_TO_EV / BOHR_TO_ANGSTROM)
+            stress_ev_ang3 = stress_ha_bohr3 * (HARTREE_TO_EV / (BOHR_TO_ANGSTROM ** 3))
+            return energy_ev, forces_ev_ang, stress_ev_ang3
+    
+    def get_supercell_structure(self) -> Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
+        """
+        Get the MULTIBINIT internal supercell structure (reference structure).
+        
+        This returns the reference structure that was either:
+        1. Set explicitly via set_reference_structure()
+        2. Automatically captured from the first evaluate() call
+        
+        Returns:
+            tuple or None: (positions, lattice, atomic_numbers) if reference is set, None otherwise
+                - positions: array shape (natom, 3) in current units (Angstrom or Bohr)
+                - lattice: array shape (3, 3) in current units
+                - atomic_numbers: array shape (natom,) or None if not available
+                
+        Notes:
+            - If auto_match_atoms=True, the first evaluate() call sets the reference
+            - Atomic numbers are not available from C API, returns None
+            - Call this after at least one evaluate() if using automatic reference
+        """
+        if self._reference_positions is None or self._reference_lattice is None:
+            return None
+        
+        return (
+            self._reference_positions.copy(),
+            self._reference_lattice.copy(),
+            None  # Atomic numbers not available from C API
+        )
+    
+    def export_supercell_to_ase(self):
+        """
+        Export the MULTIBINIT internal supercell structure to ASE Atoms object.
+        
+        Returns:
+            ase.Atoms: Atoms object with supercell structure
+            
+        Raises:
+            RuntimeError: If reference structure not available
+            ImportError: If ASE is not installed
+            
+        Notes:
+            - Positions and cell in Angstrom (ASE convention)
+            - Atomic symbols set to 'X' (unknown) since not available from C API
+            - You can set correct symbols manually: atoms.set_chemical_symbols(symbols)
+            
+        Example:
+            >>> pot = MultibinitPotential.from_params(...)
+            >>> pot.evaluate(positions, lattice)  # Sets reference
+            >>> atoms = pot.export_supercell_to_ase()
+            >>> atoms.set_chemical_symbols(['Ba']*8 + ['Ti']*8 + ['O']*24)
+            >>> atoms.write('supercell.cif')
+        """
+        try:
+            from ase import Atoms
+        except ImportError:
+            raise ImportError("ASE is required for this function. Install with: pip install ase")
+        
+        structure = self.get_supercell_structure()
+        if structure is None:
+            raise RuntimeError(
+                "Reference structure not available. Call evaluate() at least once, "
+                "or use set_reference_structure()."
+            )
+        
+        positions, lattice, atomic_numbers = structure
+        
+        # Convert to Angstrom if needed
+        if self.use_atomic_units:
+            positions_ang = positions * BOHR_TO_ANGSTROM
+            lattice_ang = lattice * BOHR_TO_ANGSTROM
+        else:
+            positions_ang = positions
+            lattice_ang = lattice
+        
+        # Create Atoms with dummy symbols (no atomic info from C API)
+        natom = len(positions)
+        atoms = Atoms(
+            symbols=['X'] * natom,
+            positions=positions_ang,
+            cell=lattice_ang,
+            pbc=True
+        )
+        
+        return atoms
+    
+    def export_supercell_to_file(self, filename: str, format: Optional[str] = None):
+        """
+        Export the MULTIBINIT internal supercell structure to a file.
+        
+        Supported formats: cif, vasp, poscar, xyz, json, extxyz, etc. (any ASE format)
+        
+        Args:
+            filename: Output filename
+            format: File format (auto-detected from extension if None)
+            
+        Raises:
+            RuntimeError: If reference structure not available
+            ImportError: If ASE is not installed
+            
+        Notes:
+            - Atomic symbols will be 'X' (unknown)
+            - Manually edit the file or use export_supercell_to_ase() to set symbols
+            
+        Example:
+            >>> pot = MultibinitPotential.from_params(...)
+            >>> pot.evaluate(positions, lattice)  # Sets reference
+            >>> pot.export_supercell_to_file('supercell.cif')
+            >>> # Manually edit supercell.cif to set correct atom types
+        """
+        atoms = self.export_supercell_to_ase()
+        atoms.write(filename, format=format)
+    
+    def free(self):
+        """Free resources."""
+        if self._initialized:
+            self.wrapper.free()
+            self._initialized = False
+    
+    def __enter__(self):
+        """Context manager support."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager cleanup."""
+        self.free()
+        return False
+    
+    def __del__(self):
+        """Destructor."""
+        self.free()

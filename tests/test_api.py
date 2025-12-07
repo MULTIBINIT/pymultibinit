@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""
+Test script for pymultibinit Python API.
+
+Run with: uv run python tests/test_api.py
+
+This script tests:
+1. Low-level wrapper (both init modes)
+2. High-level potential API
+3. ASE calculator interface
+"""
+import sys
+import os
+import numpy as np
+
+# Add pymultibinit to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from pymultibinit import MultibinitPotential, MultibinitCalculator
+
+
+def test_wrapper_abi_mode():
+    """Test low-level wrapper with .abi file."""
+    print("\n" + "="*60)
+    print("TEST 1: Wrapper with .abi file")
+    print("="*60)
+    
+    from pymultibinit.wrapper import MultibinitWrapper
+    
+    # Use test data from parent directory
+    test_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'data')
+    abi_file = os.path.join(test_data_dir, 'tmulti_l_8_1.abi')
+    
+    # Initialize
+    wrapper = MultibinitWrapper()
+    wrapper.init_from_abi_file(abi_file)
+    print(f"✓ Initialized from {abi_file}")
+    
+    # Create test structure (simple cubic cell, 5 atoms)
+    # Using atomic units (Bohr)
+    positions = np.array([
+        [0.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [2.0, 0.0, 2.0],
+        [0.0, 2.0, 2.0],
+        [1.0, 1.0, 1.0],
+    ])
+    lattice = np.array([
+        [7.0, 0.0, 0.0],
+        [0.0, 7.0, 0.0],
+        [0.0, 0.0, 7.0],
+    ])
+    
+    # Evaluate
+    energy, forces, stress = wrapper.evaluate(positions, lattice)
+    
+    print(f"  Energy: {energy:.6e} Hartree")
+    print(f"  Forces[0]: {forces[0]}")
+    print(f"  Stress: {stress}")
+    
+    # Sanity checks
+    assert np.isfinite(energy), "Energy is not finite"
+    assert np.all(np.isfinite(forces)), "Forces contain non-finite values"
+    assert np.all(np.isfinite(stress)), "Stress contains non-finite values"
+    
+    wrapper.free()
+    print("✓ PASSED\n")
+
+
+def test_wrapper_simple_mode():
+    """Test low-level wrapper with direct parameters."""
+    print("\n" + "="*60)
+    print("TEST 2: Wrapper with direct parameters")
+    print("="*60)
+    
+    from pymultibinit.wrapper import MultibinitWrapper
+    
+    # Use test data from parent directory
+    test_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'data')
+    ddb_file = os.path.join(test_data_dir, 'tmulti_l_6_DDB')
+    sys_file = os.path.join(test_data_dir, 'tmulti_l_8_1.xml')
+    
+    # Initialize with parameters
+    wrapper = MultibinitWrapper()
+    wrapper.init_from_params(
+        ddb_file=ddb_file,
+        sys_file=sys_file,
+        ncell=(2, 2, 2),
+        ngqpt=(4, 4, 4),
+        dipdip=1
+    )
+    print(f"✓ Initialized from parameters (DDB + XML)")
+    
+    # Test structure
+    positions = np.array([
+        [0.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [2.0, 0.0, 2.0],
+        [0.0, 2.0, 2.0],
+        [1.0, 1.0, 1.0],
+    ])
+    lattice = np.array([
+        [7.0, 0.0, 0.0],
+        [0.0, 7.0, 0.0],
+        [0.0, 0.0, 7.0],
+    ])
+    
+    # Evaluate
+    energy, forces, stress = wrapper.evaluate(positions, lattice)
+    
+    print(f"  Energy: {energy:.6e} Hartree")
+    print(f"  Forces[0]: {forces[0]}")
+    print(f"  Stress: {stress}")
+    
+    # Sanity checks
+    assert np.isfinite(energy), "Energy is not finite"
+    assert np.all(np.isfinite(forces)), "Forces contain non-finite values"
+    assert np.all(np.isfinite(stress)), "Stress contains non-finite values"
+    
+    wrapper.free()
+    print("✓ PASSED\n")
+
+
+def test_potential_api():
+    """Test high-level potential API with unit conversions."""
+    print("\n" + "="*60)
+    print("TEST 3: High-level Potential API")
+    print("="*60)
+    
+    test_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'data')
+    abi_file = os.path.join(test_data_dir, 'tmulti_l_8_1.abi')
+    
+    # Test with Angstrom/eV units
+    pot = MultibinitPotential.from_abi(abi_file, use_atomic_units=False)
+    print(f"✓ Created potential from {abi_file}")
+    
+    # Create structure in Angstrom
+    bohr_to_ang = 0.529177210903
+    positions_ang = np.array([
+        [0.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [2.0, 0.0, 2.0],
+        [0.0, 2.0, 2.0],
+        [1.0, 1.0, 1.0],
+    ]) * bohr_to_ang
+    
+    lattice_ang = np.array([
+        [7.0, 0.0, 0.0],
+        [0.0, 7.0, 0.0],
+        [0.0, 0.0, 7.0],
+    ]) * bohr_to_ang
+    
+    # Evaluate in eV/Angstrom
+    energy_ev, forces_ev_ang, stress_ev_ang3 = pot.evaluate(positions_ang, lattice_ang)
+    
+    print(f"  Energy: {energy_ev:.6e} eV")
+    print(f"  Forces[0]: {forces_ev_ang[0]} eV/Angstrom")
+    print(f"  Stress: {stress_ev_ang3} eV/Angstrom^3")
+    
+    # Sanity checks
+    assert np.isfinite(energy_ev), "Energy is not finite"
+    assert np.all(np.isfinite(forces_ev_ang)), "Forces contain non-finite values"
+    assert energy_ev > 0, "Energy should be positive for this test case"
+    
+    pot.free()
+    print("✓ PASSED\n")
+
+
+def test_ase_calculator():
+    """Test ASE calculator interface."""
+    print("\n" + "="*60)
+    print("TEST 4: ASE Calculator Interface")
+    print("="*60)
+    
+    try:
+        from ase import Atoms
+        from ase.units import Bohr
+    except ImportError:
+        print("⚠ Skipping ASE test (ASE not installed)")
+        return
+    
+    test_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'data')
+    ddb_file = os.path.join(test_data_dir, 'tmulti_l_6_DDB')
+    sys_file = os.path.join(test_data_dir, 'tmulti_l_8_1.xml')
+    
+    # Create calculator
+    calc = MultibinitCalculator.from_params(
+        ddb_file=ddb_file,
+        sys_file=sys_file,
+        ncell=(2, 2, 2),
+        ngqpt=(4, 4, 4),
+        dipdip=1
+    )
+    print("✓ Created ASE calculator")
+    
+    # Create simple ASE atoms object
+    positions = np.array([
+        [0.0, 0.0, 0.0],
+        [2.0, 2.0, 0.0],
+        [2.0, 0.0, 2.0],
+        [0.0, 2.0, 2.0],
+        [1.0, 1.0, 1.0],
+    ]) * Bohr  # Convert to Angstrom
+    
+    cell = np.array([
+        [7.0, 0.0, 0.0],
+        [0.0, 7.0, 0.0],
+        [0.0, 0.0, 7.0],
+    ]) * Bohr
+    
+    atoms = Atoms('Sr4Ti', positions=positions, cell=cell, pbc=True)
+    atoms.calc = calc
+    
+    # Get properties through ASE interface
+    energy = atoms.get_potential_energy()
+    forces = atoms.get_forces()
+    stress = atoms.get_stress()
+    
+    print(f"  Energy: {energy:.6e} eV")
+    print(f"  Forces[0]: {forces[0]} eV/Angstrom")
+    print(f"  Stress: {stress} eV/Angstrom^3")
+    
+    # Sanity checks
+    assert np.isfinite(energy), "Energy is not finite"
+    assert np.all(np.isfinite(forces)), "Forces contain non-finite values"
+    assert np.all(np.isfinite(stress)), "Stress contains non-finite values"
+    assert forces.shape == (5, 3), f"Forces shape should be (5,3), got {forces.shape}"
+    
+    print("✓ PASSED\n")
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "#"*60)
+    print("# PYMULTIBINIT Python API Tests")
+    print("#"*60)
+    
+    tests = [
+        test_wrapper_abi_mode,
+        test_wrapper_simple_mode,
+        test_potential_api,
+        test_ase_calculator,
+    ]
+    
+    passed = 0
+    failed = 0
+    
+    for test_func in tests:
+        try:
+            test_func()
+            passed += 1
+        except Exception as e:
+            failed += 1
+            print(f"\n✗ FAILED: {test_func.__name__}")
+            print(f"  Error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    print("\n" + "="*60)
+    print(f"SUMMARY: {passed} passed, {failed} failed")
+    print("="*60 + "\n")
+    
+    return 0 if failed == 0 else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
