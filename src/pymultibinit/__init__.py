@@ -49,6 +49,4 @@ __all__ = [
 ]
 
 
-def hello() -> str:
-    """Legacy function for testing."""
-    return "Hello from pymultibinit!"
+

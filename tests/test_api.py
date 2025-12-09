@@ -13,9 +13,6 @@ import sys
 import os
 import numpy as np
 
-# Add pymultibinit to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from pymultibinit import MultibinitPotential, MultibinitCalculator
 
 
@@ -25,7 +22,7 @@ def test_wrapper_abi_mode():
     print("TEST 1: Wrapper with .abi file")
     print("="*60)
     
-    from pymultibinit.wrapper import MultibinitWrapper
+    from pymultibinit import MultibinitWrapperCFFI as MultibinitWrapper
     
     # Use test data from parent directory
     test_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'data')
@@ -73,7 +70,7 @@ def test_wrapper_simple_mode():
     print("TEST 2: Wrapper with direct parameters")
     print("="*60)
     
-    from pymultibinit.wrapper import MultibinitWrapper
+    from pymultibinit import MultibinitWrapperCFFI as MultibinitWrapper
     
     # Use test data from parent directory
     test_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'data')

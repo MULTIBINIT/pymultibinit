@@ -47,7 +47,7 @@ class MultibinitCalculator(Calculator):
             potential: Initialized MultibinitPotential instance
             **kwargs: Additional arguments for ASE Calculator
         """
-        Calculator.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.potential = potential
     
     @classmethod
@@ -162,7 +162,7 @@ class MultibinitCalculator(Calculator):
             properties: List of properties to calculate
             system_changes: List of changed properties since last calculation
         """
-        Calculator.calculate(self, atoms, properties, system_changes)
+        super().calculate(self, atoms, properties, system_changes)
         
         # Get positions and cell from atoms (in Angstrom)
         positions = self.atoms.get_positions()  # (natom, 3) in Angstrom
