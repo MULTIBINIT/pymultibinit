@@ -173,10 +173,33 @@ class MultibinitCalculator(Calculator):
         self.results['energy'] = energy  # eV
         self.results['forces'] = forces  # eV/Angstrom
         
-        # ASE stress convention: negative of standard Voigt stress
-        # (ASE uses pressure-like sign convention)
-        # Standard Voigt: [xx, yy, zz, yz, xz, xy]
-        self.results['stress'] = -stress  # eV/Angstrom^3
+        # ASE stress convention:
+        # ASE Calculator.get_stress() returns: [xx, yy, zz, yz, xz, xy]
+        # Sign convention:
+        # ASE standard: positive = tension (expanding the cell lowers energy? No)
+        # ASE optimization algorithms (UnitCellFilter) move in direction of -gradient.
+        # Gradient w.r.t strain is V * stress.
+        # If stress > 0 (tension), dE/d\epsilon > 0. Increasing epsilon (expanding) increases energy.
+        # To minimize energy, we should decrease epsilon (contract).
+        # So UnitCellFilter should contract the cell if stress is positive.
+        #
+        # However, some DFT codes output stress with pressure convention (P = -sigma).
+        # If ABINIT returns stress where positive = tension, then ASE expects it as is.
+        #
+        # Let's check ABINIT convention in potential.py:
+        # "stress tensor (Hartree/Bohr^3) - Voigt notation"
+        # If ABINIT uses thermodynamic stress (dE/de), then it matches ASE definition.
+        #
+        # Experimentally, if relaxation diverges (explodes), try flipping the sign.
+        # Original code had: self.results['stress'] = -stress
+        # This implies ABINIT stress was treated as Pressure (positive = compression).
+        # If ABINIT stress is actually Tensile (positive = tension), then -stress would mean
+        # negative tension (compression), so optimizer would expand to relieve it.
+        # If it was already tensile, expanding makes it worse -> divergence!
+        #
+        # So if divergence occurs with -stress, it means we should probably use +stress.
+        
+        self.results['stress'] = stress  # eV/Angstrom^3
     
     def __del__(self):
         """Destructor - ensure cleanup."""

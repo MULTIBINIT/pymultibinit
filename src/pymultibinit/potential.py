@@ -139,6 +139,13 @@ class MultibinitPotential:
         pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
         pot.wrapper.init_from_abi_file(abi_file)
         pot._initialized = True
+        
+        # Automatically get internal supercell reference from C API
+        try:
+            pot._fetch_internal_supercell_reference()
+        except Exception as e:
+            warnings.warn(f"Failed to fetch internal supercell reference: {e}")
+            
         return pot
     
     @classmethod
@@ -174,7 +181,107 @@ class MultibinitPotential:
             dipdip=dipdip
         )
         pot._initialized = True
+        
+        # Automatically get internal supercell reference from C API
+        try:
+            pot._fetch_internal_supercell_reference()
+        except Exception as e:
+            warnings.warn(f"Failed to fetch internal supercell reference: {e}")
+            
         return pot
+    
+    def _fetch_internal_supercell_reference(self):
+        """
+        Fetch the expected supercell structure directly from the C library.
+        Sets _reference_positions and _reference_lattice.
+        """
+        if not self._initialized:
+            return
+            
+        # Get supercell info (in Bohr) from C API
+        try:
+            natom_super, species, pos_super_bohr, lat_super_bohr = self.wrapper.get_supercell_structure()
+        except RuntimeError:
+            # Might happen if initialization failed or data not ready
+            return
+        except AttributeError:
+            # Fallback if C wrapper hasn't been updated with get_supercell_structure yet
+            warnings.warn("get_supercell_structure not found in C wrapper. Cannot set reference structure.")
+            return
+
+        # Convert to Angstrom
+        pos_super = pos_super_bohr * BOHR_TO_ANGSTROM
+        lat_super = lat_super_bohr * BOHR_TO_ANGSTROM
+        
+        self.set_reference_structure(pos_super, lat_super)
+
+    
+    @classmethod
+    def from_params(cls, ddb_file: str, sys_file: str = "", coeff_file: str = "",
+                   ncell: Tuple[int, int, int] = (1, 1, 1),
+                   ngqpt: Tuple[int, int, int] = (1, 1, 1),
+                   dipdip: int = 1,
+                   lib_path: Optional[str] = None,
+                   use_atomic_units: bool = False) -> 'MultibinitPotential':
+        """
+        Create potential from direct parameters (no .abi file).
+        
+        Args:
+            ddb_file: Path to DDB file
+            sys_file: Path to system XML file (optional)
+            coeff_file: Path to coefficient XML file (optional)
+            ncell: Supercell dimensions [nx, ny, nz]
+            ngqpt: q-point grid [nqx, nqy, nqz]
+            dipdip: Dipole-dipole interactions (0=off, 1=on)
+            lib_path: Path to libabinit.so/dylib (optional)
+            use_atomic_units: DEPRECATED - Ignored. Always uses Angstrom/eV.
+            
+        Returns:
+            Initialized MultibinitPotential instance
+        """
+        pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
+        pot.wrapper.init_from_params(
+            ddb_file=ddb_file,
+            sys_file=sys_file,
+            coeff_file=coeff_file,
+            ncell=ncell,
+            ngqpt=ngqpt,
+            dipdip=dipdip
+        )
+        pot._initialized = True
+        
+        # Automatically get internal supercell reference from C API
+        try:
+            pot._fetch_internal_supercell_reference()
+        except Exception as e:
+            warnings.warn(f"Failed to fetch internal supercell reference: {e}")
+            
+        return pot
+    
+    def _fetch_internal_supercell_reference(self):
+        """
+        Fetch the expected supercell structure directly from the C library.
+        Sets _reference_positions and _reference_lattice.
+        """
+        if not self._initialized:
+            return
+            
+        # Get supercell info (in Bohr) from C API
+        try:
+            natom_super, species, pos_super_bohr, lat_super_bohr = self.wrapper.get_supercell_structure()
+        except RuntimeError:
+            # Might happen if initialization failed or data not ready
+            return
+        except AttributeError:
+            # Fallback if C wrapper hasn't been updated with get_supercell_structure yet
+            warnings.warn("get_supercell_structure not found in C wrapper. Cannot set reference structure.")
+            return
+
+        # Convert to Angstrom
+        pos_super = pos_super_bohr * BOHR_TO_ANGSTROM
+        lat_super = lat_super_bohr * BOHR_TO_ANGSTROM
+        
+        self.set_reference_structure(pos_super, lat_super)
     
     @classmethod
     def from_config_file(cls, config_file: str) -> 'MultibinitPotential':

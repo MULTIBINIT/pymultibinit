@@ -126,6 +126,10 @@ class MultibinitWrapperCFFI:
                                            double* positions, double* lattice,
                                            int* status);
             
+            void mb_get_supercell_structure(void* handle, int* natom, int* species,
+                                           double* positions, double* lattice,
+                                           int* status);
+            
             void mb_free_potential(void* handle, int* status);
         """)
     
@@ -184,6 +188,9 @@ class MultibinitWrapperCFFI:
             raise RuntimeError(f"mb_init_potential failed with status {status[0]}")
         
         self.handle[0] = temp_handle[0]
+        
+        # Return the ncell used (useful if it was parsed from file)
+        return ncell
     
     def init_from_params(self, ddb_file: str, sys_file: str = "", coeff_file: str = "",
                         ncell: Tuple[int, int, int] = (1, 1, 1),
@@ -337,18 +344,13 @@ class MultibinitWrapperCFFI:
         natom = self.ffi.new("int*")
         status = self.ffi.new("int*")
         
-        # Allocate dummy arrays for first call (we just need natom)
-        dummy_species = self.ffi.new("int[1]")
-        dummy_positions = self.ffi.new("double[3]")
-        lattice_arr = self.ffi.new("double[9]")
-        
-        # Call with dummy arrays to get natom
+        # Call with NULL arrays to get just natom
         self.lib.mb_get_reference_structure(
             self.handle[0],
             natom,
-            dummy_species,
-            dummy_positions,
-            lattice_arr,
+            self.ffi.NULL,
+            self.ffi.NULL,
+            self.ffi.NULL,
             status
         )
         
@@ -373,6 +375,70 @@ class MultibinitWrapperCFFI:
         
         if status[0] != 0:
             raise RuntimeError(f"mb_get_reference_structure failed with status {status[0]}")
+        
+        # Convert to numpy arrays
+        species_np = np.frombuffer(self.ffi.buffer(species, natom_val * self.ffi.sizeof("int")), dtype=np.int32).copy()  # type: ignore
+        positions_np = np.frombuffer(self.ffi.buffer(positions, natom_val * 3 * 8), dtype=np.float64).copy()  # type: ignore
+        lattice_np = np.frombuffer(self.ffi.buffer(lattice_arr, 9 * 8), dtype=np.float64).copy()  # type: ignore
+        
+        # Reshape
+        positions_np = positions_np.reshape((natom_val, 3))
+        lattice_np = lattice_np.reshape((3, 3))
+        
+        return natom_val, species_np, positions_np, lattice_np
+    
+    def get_supercell_structure(self) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get the internal supercell structure from the potential.
+        
+        Returns:
+            tuple: (natom, species, positions, lattice)
+                - natom: Number of atoms in supercell
+                - species: Atomic species (typat), shape (natom,), int32
+                - positions: Cartesian positions in Bohr, shape (natom, 3), float64
+                - lattice: Lattice vectors in Bohr, shape (3, 3), float64 (row vectors)
+        
+        Raises:
+            RuntimeError: If not initialized or retrieval fails
+        """
+        if self.handle[0] == self.ffi.NULL:
+            raise RuntimeError("Potential not initialized. Call init_from_abi_file or init_from_params first.")
+        
+        # First call to get natom
+        natom = self.ffi.new("int*")
+        status = self.ffi.new("int*")
+        
+        # Call with NULL arrays to get just natom
+        self.lib.mb_get_supercell_structure(
+            self.handle[0],
+            natom,
+            self.ffi.NULL,
+            self.ffi.NULL,
+            self.ffi.NULL,
+            status
+        )
+        
+        if status[0] != 0:
+            raise RuntimeError(f"mb_get_supercell_structure failed with status {status[0]}")
+        
+        # Now allocate proper arrays
+        natom_val = natom[0]
+        species = self.ffi.new(f"int[{natom_val}]")
+        positions = self.ffi.new(f"double[{natom_val * 3}]")
+        lattice_arr = self.ffi.new("double[9]")
+        
+        # Call again to get actual data
+        self.lib.mb_get_supercell_structure(
+            self.handle[0],
+            natom,
+            species,
+            positions,
+            lattice_arr,
+            status
+        )
+        
+        if status[0] != 0:
+            raise RuntimeError(f"mb_get_supercell_structure failed with status {status[0]}")
         
         # Convert to numpy arrays
         species_np = np.frombuffer(self.ffi.buffer(species, natom_val * self.ffi.sizeof("int")), dtype=np.int32).copy()  # type: ignore
