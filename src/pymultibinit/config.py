@@ -156,7 +156,15 @@ class MultibinitConfig:
                     raise ValueError(f"Invalid backend: {value}")
                 self.backend = value
             elif key == 'use_atomic_units':
-                self.use_atomic_units = self._parse_bool(value)
+                # Deprecated parameter - warn user
+                import warnings
+                warnings.warn(
+                    "The 'use_atomic_units' parameter is deprecated and ignored. "
+                    "PyMultibinit always uses Angstrom/eV for ASE compatibility. "
+                    "Please remove this parameter from your configuration file.",
+                    DeprecationWarning, stacklevel=2
+                )
+                self.use_atomic_units = False  # Always False now
             elif key == 'auto_match_atoms':
                 self.auto_match_atoms = self._parse_bool(value)
             elif key == 'match_tolerance':

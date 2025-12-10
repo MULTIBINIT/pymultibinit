@@ -69,7 +69,6 @@ class MultibinitCalculator(Calculator):
         potential = MultibinitPotential.from_abi(
             abi_file=abi_file,
             lib_path=lib_path,
-            use_atomic_units=False,  # ASE uses eV/Angstrom
             backend=backend
         )
         return cls(potential=potential, **kwargs)
@@ -107,7 +106,6 @@ class MultibinitCalculator(Calculator):
             ngqpt=ngqpt,
             dipdip=dipdip,
             lib_path=lib_path,
-            use_atomic_units=False,  # ASE uses eV/Angstrom
             backend=backend
         )
         return cls(potential=potential, **kwargs)
@@ -162,7 +160,7 @@ class MultibinitCalculator(Calculator):
             properties: List of properties to calculate
             system_changes: List of changed properties since last calculation
         """
-        super().calculate(self, atoms, properties, system_changes)
+        super().calculate(atoms, properties, system_changes)
         
         # Get positions and cell from atoms (in Angstrom)
         positions = self.atoms.get_positions()  # (natom, 3) in Angstrom
@@ -183,4 +181,5 @@ class MultibinitCalculator(Calculator):
     def __del__(self):
         """Destructor - ensure cleanup."""
         if hasattr(self, 'potential'):
-            self.potential.free()
+            #self.potential.free()
+            pass

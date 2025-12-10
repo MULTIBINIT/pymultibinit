@@ -122,6 +122,10 @@ class MultibinitWrapperCFFI:
                             int natom, double* energy, double* forces, double* stresses,
                             int* status);
             
+            void mb_get_reference_structure(void* handle, int* natom, int* species,
+                                           double* positions, double* lattice,
+                                           int* status);
+            
             void mb_free_potential(void* handle, int* status);
         """)
     
@@ -278,9 +282,108 @@ class MultibinitWrapperCFFI:
         )
         
         if status[0] != 0:
-            raise RuntimeError(f"mb_evaluate failed with status {status[0]}")
+            # Get reference structure info for better error message
+            try:
+                ref_natom_unitcell, _, _, _ = self.get_reference_structure()
+                ref_info = f"\n  Unit cell size: {ref_natom_unitcell} atoms (from DDB file)"
+            except:
+                ref_info = ""
+            
+            error_msg = f"mb_evaluate failed with status {status[0]}"
+            
+            # Status 3 commonly indicates structure size mismatch
+            if status[0] == 3:
+                error_msg += (
+                    f"\n\nThis usually means a supercell size mismatch between your input structure"
+                    f"\nand what MULTIBINIT expects based on the ncell parameter in config file."
+                    f"\n\nYour input:"
+                    f"\n  Input structure: {natom} atoms"
+                    f"{ref_info}"
+                    f"\n\nMULTIBINIT expects: (ncell_x × ncell_y × ncell_z × unit_cell_atoms)"
+                    f"\n  Example: ncell=2 2 2 with 5-atom unit cell → expects 40 atoms"
+                    f"\n  Example: ncell=1 1 1 with 5-atom unit cell → expects 5 atoms"
+                    f"\n\nCommon causes:"
+                    f"\n  1. Config file has ncell=X Y Z that doesn't match input structure size"
+                    f"\n  2. Phonon calculation using default ndim=[2,2,2] which creates 8× supercell"
+                    f"\n  3. Using unit cell (5 atoms) input with ncell > 1 1 1 in config"
+                    f"\n\nSolutions:"
+                    f"\n  - For unit cell input: set ncell=1 1 1 in config + use --ndim 1 1 1 for phonon"
+                    f"\n  - For supercell input: ensure ncell matches your structure size"
+                    f"\n  - Check the 'expected_natoms' validation error for exact mismatch details"
+                )
+            
+            raise RuntimeError(error_msg)
         
         return energy[0], forces.reshape((natom, 3)), stresses
+    
+    def get_reference_structure(self) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get the reference unit cell structure from the potential.
+        
+        Returns:
+            tuple: (natom, species, positions, lattice)
+                - natom: Number of atoms in unit cell
+                - species: Atomic species (typat), shape (natom,), int32
+                - positions: Cartesian positions in Bohr, shape (natom, 3), float64
+                - lattice: Lattice vectors in Bohr, shape (3, 3), float64 (row vectors)
+        
+        Raises:
+            RuntimeError: If not initialized or retrieval fails
+        """
+        if self.handle[0] == self.ffi.NULL:
+            raise RuntimeError("Potential not initialized. Call init_from_abi_file or init_from_params first.")
+        
+        # First call to get natom
+        natom = self.ffi.new("int*")
+        status = self.ffi.new("int*")
+        
+        # Allocate dummy arrays for first call (we just need natom)
+        dummy_species = self.ffi.new("int[1]")
+        dummy_positions = self.ffi.new("double[3]")
+        lattice_arr = self.ffi.new("double[9]")
+        
+        # Call with dummy arrays to get natom
+        self.lib.mb_get_reference_structure(
+            self.handle[0],
+            natom,
+            dummy_species,
+            dummy_positions,
+            lattice_arr,
+            status
+        )
+        
+        if status[0] != 0:
+            raise RuntimeError(f"mb_get_reference_structure failed with status {status[0]}")
+        
+        # Now allocate proper arrays with correct size
+        natom_val = natom[0]
+        species = self.ffi.new(f"int[{natom_val}]")
+        positions = self.ffi.new(f"double[{natom_val * 3}]")
+        lattice_arr = self.ffi.new("double[9]")
+        
+        # Call again to get actual data
+        self.lib.mb_get_reference_structure(
+            self.handle[0],
+            natom,
+            species,
+            positions,
+            lattice_arr,
+            status
+        )
+        
+        if status[0] != 0:
+            raise RuntimeError(f"mb_get_reference_structure failed with status {status[0]}")
+        
+        # Convert to numpy arrays
+        species_np = np.frombuffer(self.ffi.buffer(species, natom_val * self.ffi.sizeof("int")), dtype=np.int32).copy()  # type: ignore
+        positions_np = np.frombuffer(self.ffi.buffer(positions, natom_val * 3 * 8), dtype=np.float64).copy()  # type: ignore
+        lattice_np = np.frombuffer(self.ffi.buffer(lattice_arr, 9 * 8), dtype=np.float64).copy()  # type: ignore
+        
+        # Reshape
+        positions_np = positions_np.reshape((natom_val, 3))
+        lattice_np = lattice_np.reshape((3, 3))
+        
+        return natom_val, species_np, positions_np, lattice_np
     
     def free(self):
         """Free the underlying potential structure."""

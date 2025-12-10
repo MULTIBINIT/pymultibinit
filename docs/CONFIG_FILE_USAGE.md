@@ -32,8 +32,11 @@ from ase import Atoms
 # Create calculator from config file
 calc = MultibinitCalculator.from_config_file("multibinit.conf")
 
-# Use with ASE
-atoms = Atoms(...)
+# IMPORTANT: Structure must match the supercell size specified in ncell
+# If ncell: 2 2 2, you need a 2×2×2 supercell (not unit cell)
+unit_cell = Atoms(...)  # Unit cell
+atoms = unit_cell * (2, 2, 2)  # Create 2×2×2 supercell to match ncell
+
 atoms.calc = calc
 energy = atoms.get_potential_energy()
 forces = atoms.get_forces()
@@ -80,6 +83,27 @@ auto_match_atoms = true
 ```
 
 Sections are optional and for organization only.
+
+## ⚠️ Important: Supercell Size Requirement
+
+**The structure you pass to the calculator MUST match the `ncell` parameter in your config file.**
+
+- If `ncell: 2 2 2` → You need a **2×2×2 supercell** (40 atoms for 5-atom unit cell)
+- If `ncell: 3 3 3` → You need a **3×3×3 supercell** (135 atoms for 5-atom unit cell)
+
+**Example:**
+```python
+# Config file has: ncell: 2 2 2
+calc = MultibinitCalculator.from_config_file("config.conf")
+
+# Build matching supercell
+unit_cell = Atoms(...)  # 5 atoms
+atoms = unit_cell * (2, 2, 2)  # 40 atoms ✓ CORRECT
+
+# atoms = unit_cell  # 5 atoms ✗ WRONG - will fail!
+```
+
+**Why?** MULTIBINIT internally builds a supercell during initialization using `ncell`. Your input structure must have the same number of atoms as this internal supercell.
 
 ## Configuration Parameters
 
@@ -165,13 +189,26 @@ coeff_file: /abs/path/coeff.xml    # → /abs/path/coeff.xml
 
 ```python
 from pymultibinit import MultibinitCalculator
-from ase.io import read
+from ase import Atoms
 from ase.optimize import BFGS
 
-# Load structure
-atoms = read("structure.cif")
+# Build unit cell structure
+unit_cell = Atoms('BaHfO3',
+                 scaled_positions=[
+                     [0, 0, 0],        # Ba
+                     [0.5, 0.5, 0.5],  # Hf
+                     [0.5, 0, 0.5],    # O
+                     [0, 0.5, 0.5],    # O
+                     [0.5, 0.5, 0]     # O
+                 ],
+                 cell=[4.15, 4.15, 4.15],
+                 pbc=True)
 
-# Create calculator from config
+# IMPORTANT: Create supercell matching ncell in config
+# If config has ncell: 2 2 2, create 2×2×2 supercell
+atoms = unit_cell * (2, 2, 2)
+
+# Create calculator from config (which specifies ncell: 2 2 2)
 calc = MultibinitCalculator.from_config_file("multibinit.conf")
 atoms.calc = calc
 

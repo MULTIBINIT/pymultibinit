@@ -32,8 +32,8 @@ class MultibinitPotential:
     1. from_abi(): Load from a .abi input file (standard MULTIBINIT format)
     2. from_params(): Direct initialization without .abi file
     
-    By default, uses Angstrom and eV for I/O (matching ASE conventions).
-    Set use_atomic_units=True to work directly in Bohr and Hartree.
+    Always uses Angstrom and eV for I/O (matching ASE conventions).
+    Internal conversions to/from atomic units (Bohr/Hartree) are handled automatically.
     
     Example:
         >>> # Using .abi file
@@ -49,7 +49,7 @@ class MultibinitPotential:
         >>> energy, forces, stress = pot.evaluate(positions_ang, lattice_ang)
     """
     def __init__(self, lib_path: Optional[str] = None, 
-                 use_atomic_units: bool = False,
+                 use_atomic_units: bool = False,  # DEPRECATED: Ignored, always uses Angstrom/eV
                  auto_match_atoms: bool = True,
                  match_tolerance: float = 0.1):
         """
@@ -57,13 +57,20 @@ class MultibinitPotential:
         
         Args:
             lib_path: Path to libabinit.so/dylib (optional)
-            use_atomic_units: If True, I/O in Bohr/Hartree. If False, Angstrom/eV.
+            use_atomic_units: DEPRECATED - Ignored. Always uses Angstrom/eV for ASE compatibility.
             auto_match_atoms: If True, automatically match and reorder atoms on first evaluate()
-            match_tolerance: Maximum distance for atom matching (in Angstrom or Bohr depending on use_atomic_units)
+            match_tolerance: Maximum distance for atom matching (in Angstrom)
         """
         from .wrapper_cffi import MultibinitWrapperCFFI
         self.wrapper = MultibinitWrapperCFFI(lib_path=lib_path)
-        self.use_atomic_units = use_atomic_units
+        
+        # Always use Angstrom/eV for ASE compatibility
+        if use_atomic_units:
+            warnings.warn(
+                "use_atomic_units is deprecated and ignored. "
+                "PyMultibinit always uses Angstrom/eV for ASE compatibility.",
+                DeprecationWarning, stacklevel=2
+            )
         self._initialized = False
         
         # Atom matching configuration
@@ -89,6 +96,21 @@ class MultibinitPotential:
         if self._reference_positions is not None:
             return len(self._reference_positions)
         return 0
+    
+    @property
+    def expected_natoms(self) -> Optional[int]:
+        """
+        Expected number of atoms based on reference structure.
+        
+        Returns None until the first evaluate() call, after which it returns
+        the number of atoms from the reference structure.
+        
+        Returns:
+            int or None: Expected number of atoms, or None if not set yet.
+        """
+        if self._reference_positions is not None:
+            return len(self._reference_positions)
+        return None
         
     @property
     def supercell(self) -> Optional[Tuple[int, int, int]]:
@@ -109,7 +131,7 @@ class MultibinitPotential:
         Args:
             abi_file: Path to the .abi input file
             lib_path: Path to libabinit.so/dylib (optional)
-            use_atomic_units: If True, I/O in Bohr/Hartree. If False, Angstrom/eV.
+            use_atomic_units: DEPRECATED - Ignored. Always uses Angstrom/eV.
             
         Returns:
             Initialized MultibinitPotential instance
@@ -137,7 +159,7 @@ class MultibinitPotential:
             ngqpt: q-point grid [nqx, nqy, nqz]
             dipdip: Dipole-dipole interactions (0=off, 1=on)
             lib_path: Path to libabinit.so/dylib (optional)
-            use_atomic_units: If True, I/O in Bohr/Hartree. If False, Angstrom/eV.
+            use_atomic_units: DEPRECATED - Ignored. Always uses Angstrom/eV.
             
         Returns:
             Initialized MultibinitPotential instance
@@ -340,6 +362,15 @@ class MultibinitPotential:
         if not self._initialized:
             raise RuntimeError("Potential not initialized. Use from_abi() or from_params().")
         
+        # Validate number of atoms
+        expected_n = self.expected_natoms
+        if expected_n is not None and len(positions) != expected_n:
+            raise ValueError(
+                f"Structure has {len(positions)} atoms, but the potential expects {expected_n} atoms. "
+                f"This mismatch usually means the supercell size is incompatible with the ncell parameter "
+                f"used during initialization. Make sure the input structure has the correct supercell size."
+            )
+        
         # Handle atom matching
         positions_for_eval = positions
         need_force_remapping = False
@@ -387,13 +418,9 @@ class MultibinitPotential:
             if need_force_remapping and self._atom_mapping is not None:
                 positions_for_eval = apply_mapping_to_positions(positions, self._atom_mapping)
         
-        # Convert to atomic units if needed
-        if self.use_atomic_units:
-            pos_bohr = positions_for_eval
-            lat_bohr = lattice
-        else:
-            pos_bohr = positions_for_eval * ANGSTROM_TO_BOHR
-            lat_bohr = lattice * ANGSTROM_TO_BOHR
+        # Convert input from Angstrom to Bohr (C API always uses atomic units)
+        pos_bohr = positions_for_eval * ANGSTROM_TO_BOHR
+        lat_bohr = lattice * ANGSTROM_TO_BOHR
         
         # Call C API (always in atomic units)
         energy_ha, forces_ha_bohr, stress_ha_bohr3 = self.wrapper.evaluate(pos_bohr, lat_bohr)
@@ -403,14 +430,11 @@ class MultibinitPotential:
         if need_force_remapping and self._inverse_mapping is not None:
             forces_ha_bohr = apply_inverse_mapping_to_forces(forces_ha_bohr, self._inverse_mapping)
         
-        # Convert back if needed
-        if self.use_atomic_units:
-            return energy_ha, forces_ha_bohr, stress_ha_bohr3
-        else:
-            energy_ev = energy_ha * HARTREE_TO_EV
-            forces_ev_ang = forces_ha_bohr * (HARTREE_TO_EV / BOHR_TO_ANGSTROM)
-            stress_ev_ang3 = stress_ha_bohr3 * (HARTREE_TO_EV / (BOHR_TO_ANGSTROM ** 3))
-            return energy_ev, forces_ev_ang, stress_ev_ang3
+        # Convert output from atomic units to Angstrom/eV
+        energy_ev = energy_ha * HARTREE_TO_EV
+        forces_ev_ang = forces_ha_bohr * (HARTREE_TO_EV / BOHR_TO_ANGSTROM)
+        stress_ev_ang3 = stress_ha_bohr3 * (HARTREE_TO_EV / (BOHR_TO_ANGSTROM ** 3))
+        return energy_ev, forces_ev_ang, stress_ev_ang3
     
     def get_supercell_structure(self) -> Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
         """
@@ -477,20 +501,13 @@ class MultibinitPotential:
         
         positions, lattice, atomic_numbers = structure
         
-        # Convert to Angstrom if needed
-        if self.use_atomic_units:
-            positions_ang = positions * BOHR_TO_ANGSTROM
-            lattice_ang = lattice * BOHR_TO_ANGSTROM
-        else:
-            positions_ang = positions
-            lattice_ang = lattice
-        
+        # Positions and lattice are already in Angstrom (from wrapper or already converted)
         # Create Atoms with dummy symbols (no atomic info from C API)
         natom = len(positions)
         atoms = Atoms(
             symbols=['X'] * natom,
-            positions=positions_ang,
-            cell=lattice_ang,
+            positions=positions,
+            cell=lattice,
             pbc=True
         )
         
@@ -523,6 +540,86 @@ class MultibinitPotential:
         atoms = self.export_supercell_to_ase()
         atoms.write(filename, format=format)
     
+    def export_reference_to_ase(self):
+        """
+        Export the reference unit cell structure to ASE Atoms object.
+        
+        This uses the new C API to get the unit cell structure directly
+        without needing to call evaluate() first.
+        
+        Returns:
+            ase.Atoms: Atoms object with unit cell structure
+            
+        Raises:
+            RuntimeError: If potential not initialized
+            ImportError: If ASE is not installed
+            
+        Notes:
+            - Positions and cell in Angstrom (ASE convention)
+            - Atomic species are provided as integer types (typat)
+            - Symbols are set to element names if possible, otherwise 'X'
+            
+        Example:
+            >>> pot = MultibinitPotential.from_config_file('config.conf')
+            >>> atoms = pot.export_reference_to_ase()
+            >>> atoms.write('unit_cell.cif')
+        """
+        try:
+            from ase import Atoms
+            from ase.data import chemical_symbols
+        except ImportError:
+            raise ImportError("ASE is required for this function. Install with: pip install ase")
+        
+        if not self._initialized:
+            raise RuntimeError("Potential not initialized. Call from_params() or from_config_file() first.")
+        
+        # Get reference structure from C API
+        natom, species, positions, lattice = self.wrapper.get_reference_structure()
+        
+        # Convert to Angstrom if needed (C API returns Bohr)
+        positions_ang = positions * BOHR_TO_ANGSTROM
+        lattice_ang = lattice * BOHR_TO_ANGSTROM
+        
+        # Convert typat to symbols
+        # typat is 1-indexed, chemical_symbols is 0-indexed
+        symbols = []
+        for typat in species:
+            if 0 < typat < len(chemical_symbols):
+                symbols.append(chemical_symbols[typat])
+            else:
+                symbols.append('X')  # Unknown element
+        
+        # Create Atoms object
+        atoms = Atoms(
+            symbols=symbols,
+            positions=positions_ang,
+            cell=lattice_ang,
+            pbc=True
+        )
+        
+        return atoms
+    
+    def export_reference_to_file(self, filename: str, format: Optional[str] = None):
+        """
+        Export the reference unit cell structure to a file.
+        
+        Supported formats: cif, vasp, poscar, xyz, json, extxyz, etc. (any ASE format)
+        
+        Args:
+            filename: Output filename
+            format: File format (auto-detected from extension if None)
+            
+        Raises:
+            RuntimeError: If potential not initialized
+            ImportError: If ASE is not installed
+            
+        Example:
+            >>> pot = MultibinitPotential.from_config_file('config.conf')
+            >>> pot.export_reference_to_file('unit_cell.cif')
+        """
+        atoms = self.export_reference_to_ase()
+        atoms.write(filename, format=format)  # type: ignore
+    
     def free(self):
         """Free resources."""
         if self._initialized:
@@ -540,4 +637,5 @@ class MultibinitPotential:
     
     def __del__(self):
         """Destructor."""
-        self.free()
+        #self.free()
+        pass

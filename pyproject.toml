@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
-    { name = "Xu He", email = "mailhexu@gmail.com" }
+    { name = "Xu He", email = "x.he@uliege.be" }
 ]
 requires-python = ">=3.10"
 dependencies = [
@@ -12,6 +12,9 @@ dependencies = [
     "cffi>=2.0.0",
     "numpy>=2.2.6",
 ]
+
+[project.scripts]
+mbtools = "pymultibinit.cli:main"
 
 [build-system]
 requires = ["hatchling"]

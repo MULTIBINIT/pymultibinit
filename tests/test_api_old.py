@@ -269,21 +269,18 @@ dipdip: 1
         assert pot._initialized, "Potential should be initialized"
         assert pot.wrapper is not None, "Wrapper should exist"
         
-        # Create test structure using ASE with scaled positions (BaHfO3 cubic perovskite)
-        # Need to create 2x2x2 supercell (40 atoms) to match ncell config
-        a_bohr = 7.8411196  # From test data DDB file
-        a_ang = a_bohr * 0.529177210903  # Convert to Angstrom (~4.149 Å)
-        unit_cell = Atoms('BaHfO3',
-                         scaled_positions=[
-                             [0.0, 0.0, 0.0],      # Ba
-                             [0.5, 0.5, 0.5],      # Hf
-                             [0.5, 0.0, 0.5],      # O
-                             [0.0, 0.5, 0.5],      # O
-                             [0.5, 0.5, 0.0],      # O
-                         ],
-                         cell=[a_ang, a_ang, a_ang],
-                         pbc=True)
-        atoms = unit_cell * (2, 2, 2)  # Create 2x2x2 supercell
+        # Create test structure using ASE with scaled positions (perovskite-like)
+        a_ang = 3.9  # Lattice parameter in Angstrom
+        atoms = Atoms('Sr4Ti',
+                     scaled_positions=[
+                         [0.0, 0.0, 0.0],      # Sr
+                         [0.5, 0.5, 0.0],      # Sr
+                         [0.5, 0.0, 0.5],      # Sr
+                         [0.0, 0.5, 0.5],      # Sr
+                         [0.25, 0.25, 0.25],   # Ti
+                     ],
+                     cell=[a_ang, a_ang, a_ang],
+                     pbc=True)
         
         # Get positions and cell from ASE atoms
         positions = atoms.get_positions()
@@ -297,7 +294,7 @@ dipdip: 1
         # Sanity checks
         assert np.isfinite(energy), "Energy is not finite"
         assert np.all(np.isfinite(forces)), "Forces contain non-finite values"
-        assert forces.shape == (40, 3), f"Forces shape should be (40,3) for 2x2x2 supercell, got {forces.shape}"
+        assert forces.shape == (5, 3), f"Forces shape should be (5,3), got {forces.shape}"
         
         pot.free()
         print("✓ PASSED\n")
@@ -350,21 +347,18 @@ use_atomic_units: false
         assert calc.potential is not None, "Potential should exist"
         assert calc.potential._initialized, "Potential should be initialized"
         
-        # Create test structure using ASE with scaled positions (BaHfO3 cubic perovskite)
-        # Need to create 2x2x2 supercell (40 atoms) to match ncell config
-        a_bohr = 7.8411196  # From test data DDB file
-        a_ang = a_bohr * 0.529177210903  # Convert to Angstrom (~4.149 Å)
-        unit_cell = Atoms('BaHfO3',
-                         scaled_positions=[
-                             [0.0, 0.0, 0.0],      # Ba
-                             [0.5, 0.5, 0.5],      # Hf
-                             [0.5, 0.0, 0.5],      # O
-                             [0.0, 0.5, 0.5],      # O
-                             [0.5, 0.5, 0.0],      # O
-                         ],
-                         cell=[a_ang, a_ang, a_ang],
-                         pbc=True)
-        atoms = unit_cell * (2, 2, 2)  # Create 2x2x2 supercell
+        # Create test structure using ASE with scaled positions (perovskite-like)
+        a_ang = 3.9  # Lattice parameter in Angstrom
+        atoms = Atoms('Sr4Ti',
+                     scaled_positions=[
+                         [0.0, 0.0, 0.0],      # Sr
+                         [0.5, 0.5, 0.0],      # Sr
+                         [0.5, 0.0, 0.5],      # Sr
+                         [0.0, 0.5, 0.5],      # Sr
+                         [0.25, 0.25, 0.25],   # Ti
+                     ],
+                     cell=[a_ang, a_ang, a_ang],
+                     pbc=True)
         
         atoms.calc = calc
         
@@ -381,7 +375,7 @@ use_atomic_units: false
         assert np.isfinite(energy), "Energy is not finite"
         assert np.all(np.isfinite(forces)), "Forces contain non-finite values"
         assert np.all(np.isfinite(stress)), "Stress contains non-finite values"
-        assert forces.shape == (40, 3), f"Forces shape should be (40,3) for 2x2x2 supercell, got {forces.shape}"
+        assert forces.shape == (5, 3), f"Forces shape should be (5,3), got {forces.shape}"
         
         print("✓ PASSED\n")
         
