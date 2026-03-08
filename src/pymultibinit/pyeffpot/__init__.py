@@ -36,6 +36,7 @@ from .ddb_parser_complete import read_ddb, UnitcellData
 from .xml_parser import read_coefficient_xml, write_coefficient_xml
 from .supercell_builder import build_supercell, set_anharmonic_coeffs
 from .datastructures import CrystalInfo, IFCData, SupercellPotential
+from .potential import EffectivePotential
 from . import dipdip
 
 __all__ = [
@@ -53,6 +54,9 @@ __all__ = [
     'SupercellPotential',
     'CrystalInfo',
     'IFCData',
+    
+    # Potential evaluation
+    'EffectivePotential',
     
     # Phonon calculations
     'phonon',
