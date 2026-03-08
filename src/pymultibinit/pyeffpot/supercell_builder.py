@@ -18,6 +18,7 @@ from .datastructures import (
     CrystalInfo, 
     IFCData
 )
+from .dipdip import build_dipole_dipole_ifcs
 
 
 def build_supercell(unitcell: UnitcellData, ncell: Tuple[int, int, int]) -> SupercellPotential:
@@ -38,7 +39,7 @@ def build_supercell(unitcell: UnitcellData, ncell: Tuple[int, int, int]) -> Supe
         
     Examples
     --------
-    >>> from pymultibinit.pure_python.ddb_parser import read_ddb
+    >>> from pymultibinit.pyeffpot import read_ddb
     >>> unitcell = read_ddb("system.DDB")
     >>> supercell = build_supercell(unitcell, (4, 4, 4))
     >>> print(f"Supercell has {supercell.natom_sc} atoms")
@@ -170,6 +171,7 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
     # Map unitcell atoms to supercell atoms
     # Atom i_uc in cell (ix, iy, iz) -> atom i_sc = i_uc + natom_uc*(ix + nx*iy + nx*ny*iz)
     for irpt in range(nrpt_uc):
+        cell_shift = ifcs_uc.cell[:, irpt] if ifcs_uc.cell.ndim == 2 else np.zeros(3, dtype=int)
         for i_uc in range(natom_uc):
             for j_uc in range(natom_uc):
                 # Get IFC in unitcell
@@ -181,7 +183,10 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
                         for iz in range(nz):
                             # Supercell atom indices
                             i_sc = i_uc + natom_uc * (ix + nx * (iy + ny * iz))
-                            j_sc = j_uc + natom_uc * (ix + nx * (iy + ny * iz))
+                            jx = (ix + int(cell_shift[0])) % nx
+                            jy = (iy + int(cell_shift[1])) % ny
+                            jz = (iz + int(cell_shift[2])) % nz
+                            j_sc = j_uc + natom_uc * (jx + nx * (jy + ny * jz))
                             
                             # Copy IFC (same relative position)
                             short_atmfrc_sc[:, i_sc, :, j_sc, irpt] = ifc_uc
@@ -201,7 +206,8 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
     """
     Compute dipole-dipole (Ewald) contribution to IFCs.
     
-    This is a placeholder - full implementation requires Ewald summation.
+    Computes dipole-dipole interactions directly on the supercell at Gamma point
+    using Ewald summation. This is NOT a replication of unit-cell dipole-dipole.
     
     Parameters
     ----------
@@ -214,15 +220,41 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
     ncell : Tuple[int, int, int]
         Supercell dimensions
     """
-    # TODO: Implement Ewald summation
-    # For now, just initialize to zero
     natom_sc = crystal_sc.natom
     nrpt_sc = ifcs_sc.nrpt
     
     ifcs_sc.ewald_atmfrc = np.zeros((3, natom_sc, 3, natom_sc, nrpt_sc))
     
-    # Add Ewald to total IFCs
-    # ifcs_sc.atmfrc += ifcs_sc.ewald_atmfrc
+    # Only compute if we have dielectric and Born charge data
+    if unitcell.epsilon_inf is None or unitcell.zeff is None:
+        return
+    
+    # Check if Born charges are non-zero
+    if np.linalg.norm(unitcell.zeff) < 1e-10:
+        return
+    
+    # Build dipole-dipole IFCs for this supercell at Gamma
+    # Use Ewald summation for proper long-range treatment
+    try:
+        dd_ifcs = build_dipole_dipole_ifcs(
+            positions_cart=crystal_sc.xcart,
+            epsilon_inf=unitcell.epsilon_inf,
+            zeff=np.repeat(unitcell.zeff, np.prod(ncell), axis=2),
+            lattice_vectors=crystal_sc.rprimd,
+            use_ewald=True,
+        )
+    except Exception:
+        # If Ewald fails (e.g., scipy not available), fall back to simple
+        dd_ifcs = build_dipole_dipole_ifcs(
+            positions_cart=crystal_sc.xcart,
+            epsilon_inf=unitcell.epsilon_inf,
+            zeff=np.repeat(unitcell.zeff, np.prod(ncell), axis=2),
+            lattice_vectors=crystal_sc.rprimd,
+            use_ewald=False,
+        )
+    
+    ifcs_sc.ewald_atmfrc[:, :, :, :, 0] = dd_ifcs
+    ifcs_sc.atmfrc += ifcs_sc.ewald_atmfrc
 
 
 def _apply_asr(ifcs_sc: IFCData):

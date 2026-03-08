@@ -95,6 +95,9 @@ class TestPhonon:
         assert u.ntypat == 3, f"Expected 3 types, got {u.ntypat}"
         assert u.nqpt > 0, "No q-points found"
         assert u.energy < 0, "Energy should be negative"
+        assert hasattr(u, 'crystal'), "read_ddb should return datastructures.UnitcellData"
+        assert u.epsilon_inf.shape == (3, 3)
+        assert u.zeff.shape == (3, 3, u.natom)
         
         # Check arrays
         assert u.rprimd.shape == (3, 3), "Wrong rprimd shape"

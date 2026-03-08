@@ -51,6 +51,12 @@ class UnitcellData:
     
     # Strain-phonon coupling (optional)
     strain_coupling: Optional[np.ndarray] = None  # (6, 3, natom) if present
+
+    # Optional DDB-specific metadata
+    acell: Optional[np.ndarray] = None            # (3,) lattice parameters in Bohr
+    qpoints: Optional[np.ndarray] = None          # (nqpt, 3)
+    dynmat: Optional[np.ndarray] = None           # (nqpt, natom, 3, natom, 3, 2)
+    blocks: Optional[List] = None                 # Raw parsed DDB blocks
     
     @property
     def natom(self) -> int:
@@ -59,6 +65,36 @@ class UnitcellData:
     @property
     def ntypat(self) -> int:
         return self.crystal.ntypat
+
+    @property
+    def rprimd(self) -> np.ndarray:
+        return self.crystal.rprimd
+
+    @property
+    def xred(self) -> np.ndarray:
+        return self.crystal.xred
+
+    @property
+    def xcart(self) -> np.ndarray:
+        return self.crystal.xcart
+
+    @property
+    def typat(self) -> np.ndarray:
+        return self.crystal.typat
+
+    @property
+    def amu(self) -> np.ndarray:
+        return self.crystal.amu
+
+    @property
+    def znucl(self) -> np.ndarray:
+        return self.crystal.znucl
+
+    @property
+    def nqpt(self) -> int:
+        if self.qpoints is None:
+            return 0
+        return len(self.qpoints)
 
 
 @dataclass

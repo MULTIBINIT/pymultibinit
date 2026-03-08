@@ -27,6 +27,7 @@ from pymultibinit.pyeffpot.supercell_builder import (
     _apply_asr,
     set_anharmonic_coeffs
 )
+from pymultibinit.pyeffpot import read_ddb
 
 
 class TestSupercellBuilder:
@@ -178,6 +179,20 @@ class TestSupercellBuilder:
             supercell = build_supercell(simple_unitcell, ncell)
             expected_natom = simple_unitcell.natom * ncell[0] * ncell[1] * ncell[2]
             assert supercell.natom_sc == expected_natom
+
+    def test_read_ddb_integrates_with_supercell_builder(self):
+        """Test exported read_ddb output works with build_supercell."""
+        ddb_path = Path(__file__).parent.parent.parent / 'abinit/tests/v9/Input/BTO.DDB'
+        unitcell = read_ddb(str(ddb_path))
+
+        assert unitcell.crystal.natom == 5
+        assert unitcell.ifcs is not None
+        assert unitcell.ifcs.nrpt == 1
+        assert unitcell.rprimd.shape == (3, 3)
+
+        supercell = build_supercell(unitcell, (2, 2, 2))
+        assert supercell.natom_sc == 40
+        assert supercell.ifcs_sc.atmfrc.shape == (3, 40, 3, 40, 1)
 
 
 if __name__ == '__main__':

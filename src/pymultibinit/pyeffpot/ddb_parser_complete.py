@@ -21,7 +21,8 @@ import re
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Tuple, Union
-from pathlib import Path
+
+from .datastructures import CrystalInfo, IFCData, UnitcellData
 
 
 @dataclass
@@ -33,51 +34,6 @@ class DDBBlock:
     qnrm: float  # q-point norm
     data: Union[np.ndarray, Dict[str, Any], None] = None  # Parsed data (array or dict)
     raw_lines: Optional[List[str]] = None  # Original lines for debugging
-
-
-@dataclass
-class UnitcellData:
-    """
-    Complete unitcell data from DDB file.
-    
-    All quantities in atomic units (Bohr, Hartree).
-    All arrays use C-order (row-major).
-    """
-    # Crystal structure
-    natom: int
-    ntypat: int
-    rprimd: np.ndarray  # (3,3)
-    acell: np.ndarray   # (3,) lattice parameters in Bohr
-    xred: np.ndarray    # (natom, 3)
-    typat: np.ndarray   # (natom,)
-    znucl: np.ndarray   # (ntypat,)
-    amu: np.ndarray     # (ntypat,)
-    
-    # Reference energy
-    energy: float
-    
-    # Dielectric properties
-    epsilon_inf: np.ndarray  # (3,3)
-    zeff: np.ndarray         # (3,3,natom)
-    
-    # Stress and forces (C-order)
-    strten: np.ndarray  # (6,) in Hartree/Bohr³
-    fcart: np.ndarray   # (natom, 3) in Hartree/Bohr
-    
-    # Elastic constants
-    elastic_constants: np.ndarray  # (6,6)
-    
-    # Dynamical matrices at all q-points (C-order)
-    nqpt: int = 0  # Number of q-points
-    qpoints: Optional[np.ndarray] = None  # (nqpt, 3) q-point coordinates
-    dynmat: Optional[np.ndarray] = None   # (nqpt, natom, 3, natom, 3, 2) complex dynamical matrices
-    
-    # Real-space IFCs (C-order)
-    # Note: Currently only stores Gamma-point data; full IFC calculation needed
-    ifcs: Optional[np.ndarray] = None  # (natom, 3, natom, 3) or (nrpt, natom, 3, natom, 3) for full IFCs
-    
-    # Metadata
-    blocks: Optional[List[DDBBlock]] = None  # Raw blocks for debugging
 
 
 class DDBParser:
@@ -183,11 +139,25 @@ class DDBParser:
             elif 'acell' in line.lower():
                 values = self._read_floats(line)
                 if len(values) >= 3:
-                    self.data['acell'] = values[:3]
+                    self.data['acell'] = np.array(values[:3], dtype=float)
+                self._next_line()
+            elif 'rprim' in line.lower():
+                values = self._read_floats(line)
+                rprim_rows = []
+                if len(values) >= 3:
+                    rprim_rows.append(values[:3])
+                self._next_line()
+                for _ in range(2):
+                    more_values = self._read_floats(self._current_line())
+                    if len(more_values) >= 3:
+                        rprim_rows.append(more_values[:3])
+                    self._next_line()
+                if len(rprim_rows) == 3:
+                    self.data['rprim'] = np.array(rprim_rows, dtype=float)
                 self._next_line()
             elif 'amu' in line.lower():
                 values = self._read_floats(line)
-                self.data['amu'] = values
+                self.data['amu'] = np.array(values, dtype=float)
                 self._next_line()
             elif 'xred' in line.lower():
                 break  # End of header
@@ -216,44 +186,33 @@ class DDBParser:
         natom = self.data['natom']
         ntypat = self.data['ntypat']
         
-        # Read xred
+        # Read xred - first coordinate is on same line as 'xred' keyword
         xred = []
-        for i in range(natom):
+        
+        # Parse first coordinate from current line (contains 'xred')
+        if 'xred' in self._current_line().lower():
+            coords = self._read_floats(self._current_line())
+            if len(coords) >= 3:
+                xred.append(coords[:3])
+            self._next_line()
+        
+        # Read remaining coordinates (natom-1 more lines)
+        for i in range(natom - 1):
             line = self._next_line()
             coords = self._read_floats(line)
             if len(coords) >= 3:
                 xred.append(coords[:3])
-        self.data['xred'] = np.array(xred)
         
-        # Read typat (may not be present, look for znucl)
-        found_typat = False
-        while self.current_line < self.nlines:
-            line = self._current_line()
-            if 'typat' in line.lower():
-                values = [int(x) for x in line.split()[1:]]
-                self.data['typat'] = np.array(values[:natom])
-                self._next_line()
-                found_typat = True
-                break
-            elif 'znucl' in line.lower():
-                # No typat in this section, go to znucl parsing
-                break
-            else:
-                self._next_line()
+        self.data['xred'] = np.array(xred)
         
         # Read znucl (if not already read)
         if 'znucl' not in self.data:
-            while self.current_line < self.nlines:
+            # znucl should be right after xred
+            if self.current_line < self.nlines and 'znucl' in self._current_line().lower():
                 line = self._current_line()
-                if 'znucl' in line.lower():
-                    # znucl contains atomic numbers as floats (e.g., 56.0 for Ba)
-                    # Convert D-format to E-format for Python
-                    values = [int(float(x.replace('D', 'E').replace('d', 'e'))) for x in line.split()[1:]]
-                    self.data['znucl'] = np.array(values[:ntypat])
-                    self._next_line()
-                    break
-                else:
-                    self._next_line()
+                values = [int(float(x.replace('D', 'E').replace('d', 'e'))) for x in line.split()[1:]]
+                self.data['znucl'] = np.array(values[:ntypat])
+                self._next_line()
         
         # Skip pseudopotential data and other sections until derivative blocks
         while self.current_line < self.nlines:
@@ -321,6 +280,8 @@ class DDBParser:
             qnrm=0.0,
             raw_lines=[]
         )
+        raw_lines = block.raw_lines if block.raw_lines is not None else []
+        block.raw_lines = raw_lines
         
         # Parse based on block type
         if block_typ in ['d2E_ns', 'd2E_st']:
@@ -347,7 +308,9 @@ class DDBParser:
         
         # Read q-point
         line = self._next_line()
-        block.raw_lines.append(line)
+        raw_lines = block.raw_lines if block.raw_lines is not None else []
+        block.raw_lines = raw_lines
+        raw_lines.append(line)
         qpt_vals = self._read_floats(line)
         if len(qpt_vals) >= 4:
             block.qpt = np.array(qpt_vals[:3])
@@ -361,7 +324,7 @@ class DDBParser:
         
         for ielem in range(block.nelmts):
             line = self._next_line()
-            block.raw_lines.append(line)
+            raw_lines.append(line)
             parts = line.split()
             if len(parts) < 6:
                 continue
@@ -395,11 +358,13 @@ class DDBParser:
         Format: idir1 ipert1 ar ai
         """
         natom = self.data['natom']
+        raw_lines = block.raw_lines if block.raw_lines is not None else []
+        block.raw_lines = raw_lines
         data = {}
         
         for ielem in range(block.nelmts):
             line = self._next_line()
-            block.raw_lines.append(line)
+            raw_lines.append(line)
             parts = line.split()
             if len(parts) < 4:
                 continue
@@ -437,7 +402,9 @@ class DDBParser:
         Format: ar ai (single value)
         """
         line = self._next_line()
-        block.raw_lines.append(line)
+        raw_lines = block.raw_lines if block.raw_lines is not None else []
+        block.raw_lines = raw_lines
+        raw_lines.append(line)
         
         # Format: (2d22.14)
         parts = line.split()
@@ -451,13 +418,15 @@ class DDBParser:
     def _skip_block_lines(self, block: DDBBlock, nelmts: int):
         """Skip lines for unsupported block types."""
         # Read q-point line
+        raw_lines = block.raw_lines if block.raw_lines is not None else []
+        block.raw_lines = raw_lines
         self._next_line()
-        block.raw_lines.append(self._current_line())
+        raw_lines.append(self._current_line())
         
         # Skip element lines
         for i in range(nelmts):
             self._next_line()
-            block.raw_lines.append(self._current_line())
+            raw_lines.append(self._current_line())
     
     def _read_floats(self, line: str) -> List[float]:
         """Read float values from line (D-format, E-format, or simple floats)."""
@@ -488,10 +457,10 @@ class DDBParser:
         # Initialize
         epsilon_inf = np.eye(3)
         zeff = np.zeros((3, 3, natom))
-        ifcs = np.zeros((3, natom, 3, natom))
+        ifcs = np.zeros((natom, 3, natom, 3))
         elastic_constants = np.zeros((6, 6))
         strten = np.zeros(6)
-        fcart = np.zeros((3, natom))
+        fcart = np.zeros((natom, 3))
         energy = 0.0
         
         # Collect all q-points and dynamical matrices
@@ -560,30 +529,47 @@ class DDBParser:
         """Build UnitcellData object."""
         natom = self.data['natom']
         ntypat = self.data['ntypat']
-        
-        # Build lattice
-        acell = self.data.get('acell', [1.0, 1.0, 1.0])
-        rprimd = np.diag(acell)
-        
-        return UnitcellData(
+
+        acell = np.array(self.data.get('acell', np.ones(3)), dtype=float)
+        rprim = np.array(self.data.get('rprim', np.eye(3)), dtype=float)
+        rprimd = np.diag(acell) @ rprim
+        xred = self.data.get('xred', np.zeros((natom, 3)))
+        xcart = xred @ rprimd.T
+        typat = np.array(self.data.get('typat', np.zeros(natom, dtype=int)), dtype=int)
+        amu = np.array(self.data.get('amu', np.zeros(ntypat)), dtype=float)
+        znucl = np.array(self.data.get('znucl', np.zeros(ntypat, dtype=int)), dtype=int)
+
+        crystal = CrystalInfo(
             natom=natom,
             ntypat=ntypat,
             rprimd=rprimd,
-            acell=np.array(acell),
-            xred=self.data.get('xred', np.zeros((natom, 3))),
-            typat=self.data.get('typat', np.zeros(natom, dtype=int)),
-            znucl=self.data.get('znucl', np.zeros(ntypat, dtype=int)),
-            amu=self.data.get('amu', np.zeros(ntypat)),
+            xred=xred,
+            xcart=xcart,
+            typat=typat,
+            amu=amu,
+            znucl=znucl,
+        )
+
+        gamma_ifcs = np.array(self.data.get('ifcs', np.zeros((natom, 3, natom, 3))), dtype=float)
+        ifc_total = np.transpose(gamma_ifcs, (1, 0, 3, 2))[:, :, :, :, np.newaxis]
+        ifc_data = IFCData(
+            nrpt=1,
+            cell=np.zeros((3, 1), dtype=int),
+            atmfrc=ifc_total.copy(),
+            short_atmfrc=ifc_total.copy(),
+            ewald_atmfrc=np.zeros_like(ifc_total),
+        )
+
+        return UnitcellData(
+            crystal=crystal,
             energy=self.data.get('energy', 0.0),
+            ifcs=ifc_data,
             epsilon_inf=self.data.get('epsilon_inf', np.eye(3)),
-            zeff=self.data.get('zeff', np.zeros((3, 3, natom))),
-            strten=self.data.get('strten', np.zeros(6)),
-            fcart=self.data.get('fcart', np.zeros((3, natom))),
             elastic_constants=self.data.get('elastic_constants', np.zeros((6, 6))),
-            nqpt=self.data.get('nqpt', 0),
+            zeff=self.data.get('zeff', np.zeros((3, 3, natom))),
+            acell=acell,
             qpoints=self.data.get('qpoints', None),
             dynmat=self.data.get('dynmat', None),
-            ifcs=self.data.get('ifcs', np.zeros((3, natom, 3, natom))),
             blocks=self.blocks
         )
 
@@ -612,7 +598,9 @@ if __name__ == '__main__':
     print(f"Parsed: {sys.argv[1]}")
     print(f"  natom: {u.natom}")
     print(f"  energy: {u.energy:.10f} Ha")
-    print(f"  IFC shape: {u.ifcs.shape}")
-    print(f"  Blocks parsed: {len(u.blocks)}")
-    for i, blk in enumerate(u.blocks[:5]):
+    if u.ifcs is not None:
+        print(f"  IFC shape: {u.ifcs.atmfrc.shape}")
+    block_list = u.blocks or []
+    print(f"  Blocks parsed: {len(block_list)}")
+    for i, blk in enumerate(block_list[:5]):
         print(f"    Block {i}: {blk.typ}, q={blk.qpt}, nelmts={blk.nelmts}")
