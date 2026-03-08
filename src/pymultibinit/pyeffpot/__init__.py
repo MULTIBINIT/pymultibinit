@@ -33,6 +33,7 @@ __version__ = "0.1.0"
 
 # Import main functions for convenience
 from .ddb_parser_complete import read_ddb, UnitcellData
+from .ddb_writer import write_ddb
 from .xml_parser import read_coefficient_xml, write_coefficient_xml
 from .supercell_builder import build_supercell, set_anharmonic_coeffs
 from .datastructures import CrystalInfo, IFCData, SupercellPotential
@@ -42,6 +43,7 @@ from . import dipdip
 __all__ = [
     # DDB I/O
     'read_ddb',
+    'write_ddb',
     'UnitcellData',
     
     # XML I/O
