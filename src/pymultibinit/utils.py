@@ -35,8 +35,12 @@ def find_library(lib_name: str = "libabinit", search_paths: Optional[List[str]] 
     """
     Find the MULTIBINIT shared library across different platforms.
     
-    Searches for library with various extensions (.dylib, .so, .dll, etc.)
-    in standard locations.
+    Searches for library in the following order:
+    1. LIBABINIT_PATH environment variable (if set)
+    2. Additional search_paths (if provided)
+    3. Development environment paths
+    4. LD_LIBRARY_PATH/DYLD_LIBRARY_PATH
+    5. System library paths
     
     Args:
         lib_name: Base library name (default: "libabinit")
@@ -47,11 +51,26 @@ def find_library(lib_name: str = "libabinit", search_paths: Optional[List[str]] 
         
     Raises:
         FileNotFoundError: If library not found
+        
+    Environment Variables:
+        LIBABINIT_PATH: Full path to libabinit shared library file
+        LD_LIBRARY_PATH (Linux) / DYLD_LIBRARY_PATH (macOS): Directories to search
     """
     # Get possible extensions for this platform
     extensions = get_library_extensions()
     
-    # Build default search paths
+    # 1. Check LIBABINIT_PATH environment variable first (highest priority)
+    libabinit_path = os.environ.get('LIBABINIT_PATH')
+    if libabinit_path:
+        if os.path.exists(libabinit_path):
+            return libabinit_path
+        else:
+            raise FileNotFoundError(
+                f"LIBABINIT_PATH is set to '{libabinit_path}' but file does not exist.\n"
+                f"Please check the path or unset LIBABINIT_PATH to use automatic detection."
+            )
+    
+    # 2. Build default search paths
     if search_paths is None:
         search_paths = []
     
@@ -60,13 +79,15 @@ def find_library(lib_name: str = "libabinit", search_paths: Optional[List[str]] 
         os.path.dirname(os.path.abspath(__file__)))))
     
     default_paths = [
-        os.path.join(base_dir, "abinit_mb_clib", "build", "src", "98_main"),
-        os.path.join(base_dir, "abinit_mb_clib", "build_so", "src", "98_main"),
+        os.path.join(base_dir, "abinit", "build", "src", "98_main"),
+        os.path.join(base_dir, "abinit", "build_so", "src", "98_main"),
+        os.path.join(base_dir, "abinit_mb_clib", "build", "src", "98_main"),  # Fallback for compatibility
+        os.path.join(base_dir, "abinit_mb_clib", "build_so", "src", "98_main"),  # Fallback for compatibility
         os.path.join(base_dir, "build", "src", "98_main"),
         os.path.join(base_dir, "lib"),
     ]
     
-    # Combine search paths
+    # Combine search paths (user-provided paths have priority over defaults)
     all_paths = search_paths + default_paths
     
     # Try each path with each extension
@@ -86,8 +107,20 @@ def find_library(lib_name: str = "libabinit", search_paths: Optional[List[str]] 
                 if os.path.exists(lib_path):
                     return lib_path
     
-    # Try finding in system library paths (LD_LIBRARY_PATH, etc.)
-    # This is platform-specific
+    # Try finding in LD_LIBRARY_PATH/DYLD_LIBRARY_PATH
+    ld_lib_path_var = "DYLD_LIBRARY_PATH" if platform.system() == "Darwin" else "LD_LIBRARY_PATH"
+    ld_lib_path = os.environ.get(ld_lib_path_var)
+    if ld_lib_path:
+        ld_paths = ld_lib_path.split(os.pathsep)
+        for path in ld_paths:
+            if not os.path.isdir(path):
+                continue
+            for ext in extensions:
+                lib_path = os.path.join(path, lib_name + ext)
+                if os.path.exists(lib_path):
+                    return lib_path
+    
+    # Try finding in system library paths
     if platform.system() == "Darwin":
         # macOS: Try common homebrew/macports locations
         system_paths = [
@@ -121,8 +154,12 @@ def find_library(lib_name: str = "libabinit", search_paths: Optional[List[str]] 
     raise FileNotFoundError(
         f"Could not find {lib_name} with extensions: {extensions_str}\n"
         f"Searched paths:\n  {searched_str}\n"
-        f"Please ensure the library is built in abinit_mb_clib/build/src/98_main/\n"
-        f"or provide lib_path explicitly."
+        f"Solutions:\n"
+        f"  1. Set LIBABINIT_PATH (recommended):\n"
+        f"     export LIBABINIT_PATH=/path/to/libabinit.dylib\n"
+        f"  2. Add directory to LD_LIBRARY_PATH:\n"
+        f"     export LD_LIBRARY_PATH=/path/to/dir:$LD_LIBRARY_PATH\n"
+        f"  3. Pass lib_path to constructor: MultibinitPotential.from_abi(..., lib_path=...)"
     )
 
 

@@ -12,7 +12,7 @@ All data is for the primitive (unit) cell only.
 Supercell construction is handled separately.
 
 Example:
-    >>> from pymultibinit.pure_python.ddb_parser import read_ddb
+    >>> from pymultibinit.pyeffpot.ddb_parser import read_ddb
     >>> unitcell = read_ddb("BaTiO3.DDB")
     >>> print(unitcell.natom)
     5
