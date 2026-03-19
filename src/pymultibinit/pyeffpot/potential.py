@@ -233,19 +233,23 @@ class EffectivePotential:
         # Flatten displacements: (natom, 3) -> (3*natom)
         u = displacements.flatten()
         
-        # Energy: E = ½ u^T Φ u
-        # For now, use only first range point (irpt=0)
-        irpt = 0
-        phi = ifcs.atmfrc[:, :, :, :, irpt]  # (3, natom, 3, natom)
+        # Sum over all range points
+        nrpt = ifcs.atmfrc.shape[4]
+        energy = 0.0
+        forces_flat = np.zeros(3 * natom)
         
-        # Reshape to (3*natom, 3*natom)
-        phi_matrix = phi.transpose(1, 0, 3, 2).reshape(3*natom, 3*natom)
+        for irpt in range(nrpt):
+            phi = ifcs.atmfrc[:, :, :, :, irpt]  # (3, natom, 3, natom)
+            
+            # Reshape to (3*natom, 3*natom)
+            phi_matrix = phi.transpose(1, 0, 3, 2).reshape(3*natom, 3*natom)
+            
+            # Energy: E = ½ u^T Φ u
+            energy += 0.5 * u @ phi_matrix @ u
+            
+            # Forces: F = -Φ u
+            forces_flat += -phi_matrix @ u
         
-        # Energy
-        energy = 0.5 * u @ phi_matrix @ u
-        
-        # Forces: F = -Φ u
-        forces_flat = -phi_matrix @ u
         forces = forces_flat.reshape(natom, 3)
         
         # Stress (simplified - no strain coupling yet)
