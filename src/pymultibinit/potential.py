@@ -4,10 +4,12 @@ High-level Python API for MULTIBINIT effective potential.
 This module provides user-friendly classes that wrap the C API and handle
 unit conversions automatically.
 
-Uses CFFI backend for optimal performance.
+Supports two backends:
+- 'cffi': CFFI wrapper for Fortran library (default, optimal performance)
+- 'pyeffpot': Pure Python implementation (no Fortran dependency)
 """
 import numpy as np
-from typing import Optional, Tuple, Literal
+from typing import Optional, Tuple, Literal, Union
 import warnings
 from .atom_matching import (
     find_atom_mapping_pbc,
@@ -51,18 +53,26 @@ class MultibinitPotential:
     def __init__(self, lib_path: Optional[str] = None, 
                  use_atomic_units: bool = False,  # DEPRECATED: Ignored, always uses Angstrom/eV
                  auto_match_atoms: bool = True,
-                 match_tolerance: float = 0.1):
+                 match_tolerance: float = 0.1,
+                 backend: Literal['cffi', 'pyeffpot'] = 'cffi'):
         """
         Initialize the potential object.
         
         Args:
-            lib_path: Path to libabinit.so/dylib (optional)
+            lib_path: Path to libabinit.so/dylib (optional, only for cffi backend)
             use_atomic_units: DEPRECATED - Ignored. Always uses Angstrom/eV for ASE compatibility.
             auto_match_atoms: If True, automatically match and reorder atoms on first evaluate()
             match_tolerance: Maximum distance for atom matching (in Angstrom)
+            backend: 'cffi' for Fortran wrapper, 'pyeffpot' for pure Python
         """
-        from .wrapper_cffi import MultibinitWrapperCFFI
-        self.wrapper = MultibinitWrapperCFFI(lib_path=lib_path)
+        self.backend = backend
+        self._pyeffpot_potential = None  # For pyeffpot backend
+        
+        if backend == 'cffi':
+            from .wrapper_cffi import MultibinitWrapperCFFI
+            self.wrapper = MultibinitWrapperCFFI(lib_path=lib_path)
+        else:
+            self.wrapper = None
         
         # Always use Angstrom/eV for ASE compatibility
         if use_atomic_units:
@@ -84,6 +94,7 @@ class MultibinitPotential:
         self._reference_lattice: Optional[np.ndarray] = None  # Reference lattice
         self._mapping_validated = False
         self._is_identity_mapping = False  # Flag to skip force remapping when no reordering needed
+        self._ncell: Optional[Tuple[int, int, int]] = None  # Supercell dimensions
     
     @property
     def natoms(self) -> int:
@@ -116,11 +127,8 @@ class MultibinitPotential:
     def supercell(self) -> Optional[Tuple[int, int, int]]:
         """
         Get supercell dimensions if known (from DDB or user input).
-        Note: This is not stored directly in the potential object currently,
-        unless we store 'ncell' from initialization.
         """
-        # TODO: Store ncell in __init__ to return it here
-        return None
+        return self._ncell
 
     @classmethod
     def from_abi(cls, abi_file: str, lib_path: Optional[str] = None, 
@@ -190,72 +198,59 @@ class MultibinitPotential:
             
         return pot
     
-    def _fetch_internal_supercell_reference(self):
-        """
-        Fetch the expected supercell structure directly from the C library.
-        Sets _reference_positions and _reference_lattice.
-        """
-        if not self._initialized:
-            return
-            
-        # Get supercell info (in Bohr) from C API
-        try:
-            natom_super, species, pos_super_bohr, lat_super_bohr = self.wrapper.get_supercell_structure()
-        except RuntimeError:
-            # Might happen if initialization failed or data not ready
-            return
-        except AttributeError:
-            # Fallback if C wrapper hasn't been updated with get_supercell_structure yet
-            warnings.warn("get_supercell_structure not found in C wrapper. Cannot set reference structure.")
-            return
-
-        # Convert to Angstrom
-        pos_super = pos_super_bohr * BOHR_TO_ANGSTROM
-        lat_super = lat_super_bohr * BOHR_TO_ANGSTROM
-        
-        self.set_reference_structure(pos_super, lat_super)
-
-    
     @classmethod
-    def from_params(cls, ddb_file: str, sys_file: str = "", coeff_file: str = "",
-                   ncell: Tuple[int, int, int] = (1, 1, 1),
-                   ngqpt: Tuple[int, int, int] = (1, 1, 1),
-                   dipdip: int = 1,
-                   lib_path: Optional[str] = None,
-                   use_atomic_units: bool = False) -> 'MultibinitPotential':
+    def from_pyeffpot(cls, ddb_file: str, xml_file: Optional[str] = None,
+                      ncell: Tuple[int, int, int] = (4, 4, 4),
+                      auto_match_atoms: bool = True,
+                      match_tolerance: float = 0.1) -> 'MultibinitPotential':
         """
-        Create potential from direct parameters (no .abi file).
+        Create potential using pure Python backend (no Fortran dependency).
         
         Args:
             ddb_file: Path to DDB file
-            sys_file: Path to system XML file (optional)
-            coeff_file: Path to coefficient XML file (optional)
+            xml_file: Path to coefficient XML file (optional)
             ncell: Supercell dimensions [nx, ny, nz]
-            ngqpt: q-point grid [nqx, nqy, nqz]
-            dipdip: Dipole-dipole interactions (0=off, 1=on)
-            lib_path: Path to libabinit.so/dylib (optional)
-            use_atomic_units: DEPRECATED - Ignored. Always uses Angstrom/eV.
+            auto_match_atoms: If True, automatically match atoms on first evaluate()
+            match_tolerance: Maximum distance for atom matching (in Angstrom)
             
         Returns:
-            Initialized MultibinitPotential instance
+            Initialized MultibinitPotential instance with pyeffpot backend
+            
+        Example:
+            >>> pot = MultibinitPotential.from_pyeffpot(
+            ...     ddb_file="system.DDB",
+            ...     xml_file="coeffs.xml",
+            ...     ncell=(4, 4, 4)
+            ... )
+            >>> energy, forces, stress = pot.evaluate(positions_ang, lattice_ang)
         """
-        pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
-        pot.wrapper.init_from_params(
-            ddb_file=ddb_file,
-            sys_file=sys_file,
-            coeff_file=coeff_file,
-            ncell=ncell,
-            ngqpt=ngqpt,
-            dipdip=dipdip
-        )
+        from .pyeffpot import EffectivePotential, read_ddb, build_supercell
+        from .pyeffpot.xml_parser import read_coefficient_xml
+        
+        pot = cls(backend='pyeffpot', auto_match_atoms=auto_match_atoms, 
+                  match_tolerance=match_tolerance)
+        
+        unitcell = read_ddb(ddb_file)
+        supercell = build_supercell(unitcell, ncell)
+        
+        if xml_file:
+            from pathlib import Path
+            if Path(xml_file).exists():
+                coeffs = read_coefficient_xml(xml_file)
+                supercell.anharmonic_coeffs = coeffs
+        
+        pot._pyeffpot_potential = EffectivePotential(supercell)
         pot._initialized = True
         
-        # Automatically get internal supercell reference from C API
-        try:
-            pot._fetch_internal_supercell_reference()
-        except Exception as e:
-            warnings.warn(f"Failed to fetch internal supercell reference: {e}")
-            
+        pot._ncell = ncell
+        
+        ref_pos_bohr = pot._pyeffpot_potential._reference_positions
+        ref_lat_bohr = pot._pyeffpot_potential._reference_lattice
+        pot.set_reference_structure(
+            ref_pos_bohr * BOHR_TO_ANGSTROM,
+            ref_lat_bohr * BOHR_TO_ANGSTROM
+        )
+        
         return pot
     
     def _fetch_internal_supercell_reference(self):
@@ -525,12 +520,28 @@ class MultibinitPotential:
             if need_force_remapping and self._atom_mapping is not None:
                 positions_for_eval = apply_mapping_to_positions(positions, self._atom_mapping)
         
-        # Convert input from Angstrom to Bohr (C API always uses atomic units)
+        # Convert input from Angstrom to Bohr (both backends use atomic units internally)
         pos_bohr = positions_for_eval * ANGSTROM_TO_BOHR
         lat_bohr = lattice * ANGSTROM_TO_BOHR
         
-        # Call C API (always in atomic units)
-        energy_ha, forces_ha_bohr, stress_ha_bohr3 = self.wrapper.evaluate(pos_bohr, lat_bohr)
+        # Call backend (both return atomic units: Hartree, Hartree/Bohr, Hartree/Bohr^3)
+        if self.backend == 'pyeffpot':
+            assert self._pyeffpot_potential is not None
+            energy_ha, forces_ha_bohr, stress_ha_bohr3 = self._pyeffpot_potential.evaluate(
+                pos_bohr, lat_bohr
+            )
+            if stress_ha_bohr3.shape == (3, 3):
+                stress_ha_bohr3 = np.array([
+                    stress_ha_bohr3[0, 0],
+                    stress_ha_bohr3[1, 1],
+                    stress_ha_bohr3[2, 2],
+                    stress_ha_bohr3[1, 2],
+                    stress_ha_bohr3[0, 2],
+                    stress_ha_bohr3[0, 1],
+                ])
+        else:
+            assert self.wrapper is not None
+            energy_ha, forces_ha_bohr, stress_ha_bohr3 = self.wrapper.evaluate(pos_bohr, lat_bohr)
         
         # Map forces back to input order if needed
         # Skip if identity mapping (optimization)
@@ -730,7 +741,8 @@ class MultibinitPotential:
     def free(self):
         """Free resources."""
         if self._initialized:
-            self.wrapper.free()
+            if self.backend == 'cffi' and self.wrapper is not None:
+                self.wrapper.free()
             self._initialized = False
     
     def __enter__(self):

@@ -130,6 +130,14 @@ class DDBParser:
                     except ValueError:
                         pass
                 self._next_line()
+            elif 'nsym' in line.lower() and line.strip().startswith('nsym'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        self.data['nsym'] = int(parts[1])
+                    except ValueError:
+                        pass
+                self._next_line()
             elif 'typat' in line.lower() and 'ntypat' not in line.lower():
                 # Parse atom types
                 values = [int(x) for x in line.split()[1:]]
@@ -159,6 +167,28 @@ class DDBParser:
                 values = self._read_floats(line)
                 self.data['amu'] = np.array(values, dtype=float)
                 self._next_line()
+            elif line.strip().startswith('symrel'):
+                # Parse all symmetry operations (nsym of them)
+                nsym = self.data.get('nsym', 0)
+                symrel_list = []
+                # First sym op may be on same line as 'symrel'
+                vals = [int(x) for x in line.split()[1:]]
+                if len(vals) >= 9:
+                    symrel_list.append(np.array(vals[:9]).reshape(3, 3))
+                self._next_line()
+                while len(symrel_list) < nsym and self.current_line < self.nlines:
+                    next_line = self._current_line()
+                    try:
+                        vals = [int(x) for x in next_line.split()]
+                        if len(vals) >= 9:
+                            symrel_list.append(np.array(vals[:9]).reshape(3, 3))
+                            self._next_line()
+                        else:
+                            break
+                    except ValueError:
+                        break
+                if symrel_list:
+                    self.data['symrel'] = np.array(symrel_list, dtype=int)
             elif 'xred' in line.lower():
                 break  # End of header
             else:
@@ -212,6 +242,14 @@ class DDBParser:
                 line = self._current_line()
                 values = [int(float(x.replace('D', 'E').replace('d', 'e'))) for x in line.split()[1:]]
                 self.data['znucl'] = np.array(values[:ntypat])
+                self._next_line()
+        
+        # Read zion (ionic charges for Born effective charges)
+        if 'zion' not in self.data:
+            if self.current_line < self.nlines and 'zion' in self._current_line().lower():
+                line = self._current_line()
+                values = [float(x.replace('D', 'E').replace('d', 'e')) for x in line.split()[1:]]
+                self.data['zion'] = np.array(values[:ntypat])
                 self._next_line()
         
         # Skip pseudopotential data and other sections until derivative blocks
@@ -451,11 +489,41 @@ class DDBParser:
         return values
     
     def _extract_quantities(self):
-        """Extract physical quantities from blocks (matching Fortran)."""
+        """Extract physical quantities from blocks (matching ABINIT cart29 and dtech9).
+        
+        The raw DDB values are stored in reduced coordinates with specific 2π factors.
+        Following ABINIT's cart29 coordinate transformation:
+        - For atom-E: d2E_cart = d2E_raw / (2π)
+        - For E-E: d2E_cart = d2E_raw * (a/2π)^2 where a is the lattice constant
+        """
         natom = self.data['natom']
+        ntypat = self.data['ntypat']
+        typat = self.data['typat']
+        
+        # Get ionic charges from zion (if available) or znucl
+        if 'zion' in self.data:
+            zion = np.array(self.data['zion'])
+        else:
+            zion = np.array(self.data['znucl'])
+        
+        # Unit cell volume and lattice vectors
+        acell = np.array(self.data.get('acell', np.ones(3)))
+        rprim = np.array(self.data.get('rprim', np.eye(3)))
+        rprimd = np.diag(acell) @ rprim
+        ucvol = np.abs(np.linalg.det(rprimd))
+        
+        # Compute metric for coordinate transformation
+        gprimd = 2 * np.pi * np.linalg.inv(rprimd).T  # Reciprocal lattice vectors
+        
+        # For cubic systems, the transformation factors are:
+        # - atom-E: 1/(2π) from the rprimd/2π transformation in cart39
+        # - E-E: (a/2π)^2 from two rprimd/2π transformations
+        # For non-cubic systems, we need the full tensor transformation
+        # For simplicity, use the average lattice constant for the scaling factor
+        a_avg = (np.linalg.norm(rprimd[0]) + np.linalg.norm(rprimd[1]) + np.linalg.norm(rprimd[2])) / 3
         
         # Initialize
-        epsilon_inf = np.eye(3)
+        epsilon_inf = np.zeros((3, 3))
         zeff = np.zeros((3, 3, natom))
         ifcs = np.zeros((natom, 3, natom, 3))
         elastic_constants = np.zeros((6, 6))
@@ -475,31 +543,96 @@ class DDBParser:
                     energy = block.data['energy']
             
             elif block.typ in ['d2E_ns', 'd2E_st']:
+                # Extract Born effective charges and dielectric tensor
+                # Following ABINIT's cart29 and dtech9 subroutines
+                # DDB format: idir1 ipert1 idir2 ipert2 ar ai
+                if block.raw_lines and np.allclose(block.qpt, 0):
+                    for line in block.raw_lines:
+                        parts = line.split()
+                        if len(parts) < 6:
+                            continue
+                        try:
+                            idir1 = int(parts[0])
+                            ipert1 = int(parts[1])
+                            idir2 = int(parts[2])
+                            ipert2 = int(parts[3])
+                            ar = float(parts[4].replace('D', 'E').replace('d', 'e'))
+                            
+                            # Case 1: atom-E perturbation
+                            # Raw value: d²E/(dτ_red dE_red)
+                            # Conversion: d²E_cart = d²E_raw / (2π)
+                            if 1 <= ipert1 <= natom and ipert2 == natom + 2:
+                                iatom = ipert1 - 1
+                                depl = idir1 - 1
+                                elec = idir2 - 1
+                                if 0 <= depl < 3 and 0 <= elec < 3:
+                                    # Apply coordinate transformation: divide by 2π
+                                    d2E_cart = ar / (2.0 * np.pi)
+                                    # Add zion only for diagonal elements (depl == elec)
+                                    if depl == elec:
+                                        val = zion[typat[iatom]-1] + d2E_cart
+                                    else:
+                                        val = d2E_cart
+                                    zeff[elec, depl, iatom] += val
+                            
+                            # Case 2: E-atom perturbation
+                            # Same conversion as Case 1
+                            elif ipert1 == natom + 2 and 1 <= ipert2 <= natom:
+                                iatom = ipert2 - 1
+                                elec = idir1 - 1
+                                depl = idir2 - 1
+                                if 0 <= depl < 3 and 0 <= elec < 3:
+                                    # Apply coordinate transformation: divide by 2π
+                                    d2E_cart = ar / (2.0 * np.pi)
+                                    # Add zion only for diagonal elements (depl == elec)
+                                    if depl == elec:
+                                        val = zion[typat[iatom]-1] + d2E_cart
+                                    else:
+                                        val = d2E_cart
+                                    zeff[elec, depl, iatom] += val
+                            
+                            # Case 3: E-E perturbation (dielectric tensor)
+                            # Raw value: d²E/(dE_red dE_red)
+                            # Conversion: d²E_cart = d²E_raw * (a/2π)^2
+                            # Then: eps = -4π/vol * d²E_cart (off-diagonal)
+                            #       eps = 1 - 4π/vol * d²E_cart (diagonal)
+                            elif ipert1 == natom + 2 and ipert2 == natom + 2:
+                                elec1 = idir1 - 1
+                                elec2 = idir2 - 1
+                                if 0 <= elec1 < 3 and 0 <= elec2 < 3:
+                                    # Apply coordinate transformation: multiply by (a/2π)^2
+                                    factor = (a_avg / (2.0 * np.pi)) ** 2
+                                    d2E_cart = ar * factor
+                                    # Convert to dielectric: eps = -4π/vol * d2E_cart
+                                    # Then add 1.0 only for diagonal elements
+                                    val = -4.0 * np.pi / ucvol * d2E_cart
+                                    if elec1 == elec2:  # diagonal element
+                                        val = 1.0 + val
+                                    epsilon_inf[elec1, elec2] = val
+                        except (ValueError, IndexError):
+                            continue
+                
                 # Collect dynamical matrices from all q-points
                 if block.data is not None and isinstance(block.data, np.ndarray):
                     if block.data.ndim == 4:
-                        # Store q-point and dynamical matrix
                         qpoints_list.append(block.qpt)
-                        
-                        # block.data is already in C-order: (natom, 3, natom, 3)
-                        # Convert to complex form with real/imag parts
-                        # C-order: (natom, 3, natom, 3, 2)
                         dynmat_real = block.data
                         dynmat_imag = np.zeros_like(dynmat_real)
                         dynmat_complex = np.stack([dynmat_real, dynmat_imag], axis=-1)
                         dynmat_list.append(dynmat_complex)
                         
-                        # Keep Gamma-point IFCs for backward compatibility
                         if np.allclose(block.qpt, 0):
                             ifcs = block.data
             
             elif block.typ == 'd1E_xx':
-                # Forces and stress from 1st derivatives
                 if isinstance(block.data, dict):
                     if 'fcart' in block.data:
                         fcart = block.data['fcart']
                     if 'strten' in block.data:
                         strten = block.data['strten']
+        
+        # Average zeff from both terms (dtech9 formula)
+        zeff = zeff / 2.0
         
         # Convert lists to arrays
         if qpoints_list:
@@ -509,10 +642,15 @@ class DDBParser:
             # Stack dynamical matrices: (nqpt, natom, 3, natom, 3, 2) in C-order
             # Each element is (natom, 3, natom, 3, 2)
             dynmat = np.stack(dynmat_list, axis=0)
+            
+            # Infer ngqpt from the q-point coordinates
+            # Find smallest non-zero |q| component to determine grid size
+            ngqpt = self._infer_ngqpt(qpoints)
         else:
             qpoints = None
             dynmat = None
             nqpt = 0
+            ngqpt = np.array([1, 1, 1], dtype=int)
         
         self.data['epsilon_inf'] = epsilon_inf
         self.data['zeff'] = zeff
@@ -524,7 +662,29 @@ class DDBParser:
         self.data['nqpt'] = nqpt
         self.data['qpoints'] = qpoints
         self.data['dynmat'] = dynmat
+        self.data['ngqpt'] = ngqpt
     
+    def _infer_ngqpt(self, qpoints: np.ndarray) -> np.ndarray:
+        """
+        Infer ngqpt from irreducible q-points.
+        
+        The grid size along each direction is 1 / min_nonzero_step.
+        For a 4x4x4 grid, q-coords are multiples of 0.25, so ngqpt=4.
+        """
+        ngqpt = np.ones(3, dtype=int)
+        for idir in range(3):
+            coords = np.abs(qpoints[:, idir])
+            # Use only values in [0, 0.5]
+            coords = coords[coords > 1e-6]
+            # Fold 0.5 to also count as 1/2
+            coords_fold = np.where(coords > 0.5 - 1e-6, 1.0 - coords, coords)
+            coords_fold = coords_fold[coords_fold > 1e-6]
+            if len(coords_fold) > 0:
+                min_step = np.min(coords_fold)
+                n = int(np.round(1.0 / min_step))
+                ngqpt[idir] = max(n, 1)
+        return ngqpt
+
     def _build_unitcell(self) -> UnitcellData:
         """Build UnitcellData object."""
         natom = self.data['natom']
@@ -560,6 +720,8 @@ class DDBParser:
             ewald_atmfrc=np.zeros_like(ifc_total),
         )
 
+        symrel_raw = self.data.get('symrel', None)
+
         return UnitcellData(
             crystal=crystal,
             energy=self.data.get('energy', 0.0),
@@ -570,7 +732,11 @@ class DDBParser:
             acell=acell,
             qpoints=self.data.get('qpoints', None),
             dynmat=self.data.get('dynmat', None),
-            blocks=self.blocks
+            blocks=self.blocks,
+            ngqpt=self.data.get('ngqpt', None),
+            symrel=symrel_raw,
+            nqshft=1,
+            q1shft=np.zeros((1, 3)),
         )
 
 

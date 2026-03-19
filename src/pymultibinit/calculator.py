@@ -52,7 +52,6 @@ class MultibinitCalculator(Calculator):
     
     @classmethod
     def from_abi(cls, abi_file: str, lib_path: Optional[str] = None,
-                backend: Literal["ctypes", "cffi"] = "ctypes",
                 **kwargs) -> 'MultibinitCalculator':
         """
         Create calculator from a .abi input file.
@@ -60,7 +59,6 @@ class MultibinitCalculator(Calculator):
         Args:
             abi_file: Path to the .abi input file
             lib_path: Path to libabinit.so/dylib (optional)
-            backend: Which wrapper backend to use ("ctypes" or "cffi")
             **kwargs: Additional arguments for ASE Calculator
             
         Returns:
@@ -68,8 +66,7 @@ class MultibinitCalculator(Calculator):
         """
         potential = MultibinitPotential.from_abi(
             abi_file=abi_file,
-            lib_path=lib_path,
-            backend=backend
+            lib_path=lib_path
         )
         return cls(potential=potential, **kwargs)
     
@@ -79,7 +76,6 @@ class MultibinitCalculator(Calculator):
                    ngqpt: Tuple[int, int, int] = (1, 1, 1),
                    dipdip: int = 1,
                    lib_path: Optional[str] = None,
-                   backend: Literal["ctypes", "cffi"] = "ctypes",
                    **kwargs) -> 'MultibinitCalculator':
         """
         Create calculator from direct parameters (no .abi file).
@@ -92,7 +88,6 @@ class MultibinitCalculator(Calculator):
             ngqpt: q-point grid [nqx, nqy, nqz]
             dipdip: Dipole-dipole interactions (0=off, 1=on)
             lib_path: Path to libabinit.so/dylib (optional)
-            backend: Which wrapper backend to use ("ctypes" or "cffi")
             **kwargs: Additional arguments for ASE Calculator
             
         Returns:
@@ -105,8 +100,7 @@ class MultibinitCalculator(Calculator):
             ncell=ncell,
             ngqpt=ngqpt,
             dipdip=dipdip,
-            lib_path=lib_path,
-            backend=backend
+            lib_path=lib_path
         )
         return cls(potential=potential, **kwargs)
     
