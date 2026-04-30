@@ -96,7 +96,7 @@ def write_ddb(filename: str, unitcell: UnitcellData):
         for iatom in range(crystal.natom):
             lines.append(f"  Atom {iatom + 1}")
             for i in range(3):
-                row = unitcell.zeff[i, :, iatom]
+                row = unitcell.zeff[iatom, i, :]
                 lines.append(f"    {row[0]:.14E}  {row[1]:.14E}  {row[2]:.14E}")
         lines.append("")
     
@@ -113,12 +113,12 @@ def write_ddb(filename: str, unitcell: UnitcellData):
         lines.append("")
         
         # Write IFC elements (simplified format)
-        phi = unitcell.ifcs.atmfrc[:, :, :, :, 0]  # (3, natom, 3, natom)
+        phi = unitcell.ifcs.atmfrc[:, :, :, :, 0]  # (natom, 3, natom, 3)
         for i in range(natom):
             for j in range(natom):
                 for mu in range(3):
                     for nu in range(3):
-                        val = phi[mu, i, nu, j]
+                        val = phi[i, mu, j, nu]
                         if abs(val) > 1e-15:
                             lines.append(f"  {mu+1}  {i+1}  {nu+1}  {j+1}  {val:.14E}  0.00000000E+00")
     

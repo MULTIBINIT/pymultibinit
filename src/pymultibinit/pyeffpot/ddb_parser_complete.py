@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Tuple, Union
 
 from .datastructures import CrystalInfo, IFCData, UnitcellData
+from .symmetry import build_atom_mapping, expand_zeff_by_symmetry
 
 
 @dataclass
@@ -374,20 +375,18 @@ class DDBParser:
             ar = float(parts[4].replace('D', 'E').replace('d', 'e'))
             ai = float(parts[5].replace('D', 'E').replace('d', 'e'))
             
-            # Store as real (ignore imaginary for now)
+            # Store complex value
             key = (idir1, ipert1, idir2, ipert2)
-            data[key] = ar
+            data[key] = ar + 1j * ai
         
-        # Convert to IFC array: (natom, 3, natom, 3) in C-order
-        # Fortran order: (idir1, ipert1, idir2, ipert2)
-        # C-order: (ipert1, idir1, ipert2, idir2)
-        ifcs = np.zeros((natom, 3, natom, 3))
+        # Convert to IFC array: (natom, 3, natom, 3) complex
+        dm_complex = np.zeros((natom, 3, natom, 3), dtype=complex)
         for (idir1, ipert1, idir2, ipert2), val in data.items():
             if 1 <= idir1 <= 3 and 1 <= ipert1 <= natom:
                 if 1 <= idir2 <= 3 and 1 <= ipert2 <= natom:
-                    ifcs[ipert1-1, idir1-1, ipert2-1, idir2-1] = val
+                    dm_complex[ipert1-1, idir1-1, ipert2-1, idir2-1] = val
         
-        block.data = ifcs
+        block.data = dm_complex
     
     def _parse_d1E_block(self, block: DDBBlock):
         """
@@ -416,13 +415,13 @@ class DDBParser:
         
         # Extract forces (ipert1 <= natom) and stress (ipert1 > natom)
         # Forces: C-order (natom, 3)
-        fcart = np.zeros((natom, 3))
+        fred = np.zeros((natom, 3))
         strten = np.zeros(6)
         
         for (idir1, ipert1), val in data.items():
             if 1 <= ipert1 <= natom and 1 <= idir1 <= 3:
-                # Forces in C-order: (iatom, idir)
-                fcart[ipert1-1, idir1-1] = val
+                # Store reduced forces
+                fred[ipert1-1, idir1-1] = val
             elif ipert1 > natom:
                 # Stress: ipert1 = natom+1..natom+6
                 istrain = ipert1 - natom - 1
@@ -431,7 +430,7 @@ class DDBParser:
                     if istrain < 3:
                         strten[istrain] = val
         
-        block.data = {'fcart': fcart, 'strten': strten}
+        block.data = {'fred': fred, 'strten': strten}
     
     def _parse_d0E_block(self, block: DDBBlock):
         """
@@ -489,13 +488,7 @@ class DDBParser:
         return values
     
     def _extract_quantities(self):
-        """Extract physical quantities from blocks (matching ABINIT cart29 and dtech9).
-        
-        The raw DDB values are stored in reduced coordinates with specific 2π factors.
-        Following ABINIT's cart29 coordinate transformation:
-        - For atom-E: d2E_cart = d2E_raw / (2π)
-        - For E-E: d2E_cart = d2E_raw * (a/2π)^2 where a is the lattice constant
-        """
+        """Extract physical quantities from blocks (matching ABINIT cart29)."""
         natom = self.data['natom']
         ntypat = self.data['ntypat']
         typat = self.data['typat']
@@ -512,26 +505,24 @@ class DDBParser:
         rprimd = np.diag(acell) @ rprim
         ucvol = np.abs(np.linalg.det(rprimd))
         
-        # Compute metric for coordinate transformation
-        gprimd = 2 * np.pi * np.linalg.inv(rprimd).T  # Reciprocal lattice vectors
-        
-        # For cubic systems, the transformation factors are:
-        # - atom-E: 1/(2π) from the rprimd/2π transformation in cart39
-        # - E-E: (a/2π)^2 from two rprimd/2π transformations
-        # For non-cubic systems, we need the full tensor transformation
-        # For simplicity, use the average lattice constant for the scaling factor
-        a_avg = (np.linalg.norm(rprimd[0]) + np.linalg.norm(rprimd[1]) + np.linalg.norm(rprimd[2])) / 3
+        # Pre-compute transformation matrices matching ABINIT cart29
+        # In ABINIT, rprimd has vectors in COLUMNS. Here rprimd has vectors in ROWS (A).
+        # mat_MP (phonon): V_cart = rprimd^-T * V_red
+        # mat_ME (electric field): V_cart = rprimd^T * V_red / (2pi)
+        inv_rprimd_T = np.linalg.inv(rprimd).T
+        mat_MP = inv_rprimd_T
+        mat_ME = rprimd.T / (2.0 * np.pi)
         
         # Initialize
-        epsilon_inf = np.zeros((3, 3))
-        zeff = np.zeros((3, 3, natom))
+        epsilon_inf = np.eye(3)
+        zeff = np.zeros((natom, 3, 3))
         ifcs = np.zeros((natom, 3, natom, 3))
         elastic_constants = np.zeros((6, 6))
         strten = np.zeros(6)
         fcart = np.zeros((natom, 3))
         energy = 0.0
         
-        # Collect all q-points and dynamical matrices
+        # Collect all q-points and transformed dynamical matrices
         qpoints_list = []
         dynmat_list = []
         
@@ -543,115 +534,82 @@ class DDBParser:
                     energy = block.data['energy']
             
             elif block.typ in ['d2E_ns', 'd2E_st']:
-                # Extract Born effective charges and dielectric tensor
-                # Following ABINIT's cart29 and dtech9 subroutines
-                # DDB format: idir1 ipert1 idir2 ipert2 ar ai
-                if block.raw_lines and np.allclose(block.qpt, 0):
-                    for line in block.raw_lines:
-                        parts = line.split()
-                        if len(parts) < 6:
-                            continue
-                        try:
-                            idir1 = int(parts[0])
-                            ipert1 = int(parts[1])
-                            idir2 = int(parts[2])
-                            ipert2 = int(parts[3])
-                            ar = float(parts[4].replace('D', 'E').replace('d', 'e'))
-                            
-                            # Case 1: atom-E perturbation
-                            # Raw value: d²E/(dτ_red dE_red)
-                            # Conversion: d²E_cart = d²E_raw / (2π)
-                            if 1 <= ipert1 <= natom and ipert2 == natom + 2:
-                                iatom = ipert1 - 1
-                                depl = idir1 - 1
-                                elec = idir2 - 1
-                                if 0 <= depl < 3 and 0 <= elec < 3:
-                                    # Apply coordinate transformation: divide by 2π
-                                    d2E_cart = ar / (2.0 * np.pi)
-                                    # Add zion only for diagonal elements (depl == elec)
-                                    if depl == elec:
-                                        val = zion[typat[iatom]-1] + d2E_cart
-                                    else:
-                                        val = d2E_cart
-                                    zeff[elec, depl, iatom] += val
-                            
-                            # Case 2: E-atom perturbation
-                            # Same conversion as Case 1
-                            elif ipert1 == natom + 2 and 1 <= ipert2 <= natom:
-                                iatom = ipert2 - 1
-                                elec = idir1 - 1
-                                depl = idir2 - 1
-                                if 0 <= depl < 3 and 0 <= elec < 3:
-                                    # Apply coordinate transformation: divide by 2π
-                                    d2E_cart = ar / (2.0 * np.pi)
-                                    # Add zion only for diagonal elements (depl == elec)
-                                    if depl == elec:
-                                        val = zion[typat[iatom]-1] + d2E_cart
-                                    else:
-                                        val = d2E_cart
-                                    zeff[elec, depl, iatom] += val
-                            
-                            # Case 3: E-E perturbation (dielectric tensor)
-                            # Raw value: d²E/(dE_red dE_red)
-                            # Conversion: d²E_cart = d²E_raw * (a/2π)^2
-                            # Then: eps = -4π/vol * d²E_cart (off-diagonal)
-                            #       eps = 1 - 4π/vol * d²E_cart (diagonal)
-                            elif ipert1 == natom + 2 and ipert2 == natom + 2:
-                                elec1 = idir1 - 1
-                                elec2 = idir2 - 1
-                                if 0 <= elec1 < 3 and 0 <= elec2 < 3:
-                                    # Apply coordinate transformation: multiply by (a/2π)^2
-                                    factor = (a_avg / (2.0 * np.pi)) ** 2
-                                    d2E_cart = ar * factor
-                                    # Convert to dielectric: eps = -4π/vol * d2E_cart
-                                    # Then add 1.0 only for diagonal elements
-                                    val = -4.0 * np.pi / ucvol * d2E_cart
-                                    if elec1 == elec2:  # diagonal element
-                                        val = 1.0 + val
-                                    epsilon_inf[elec1, elec2] = val
-                        except (ValueError, IndexError):
-                            continue
-                
-                # Collect dynamical matrices from all q-points
                 if block.data is not None and isinstance(block.data, np.ndarray):
                     if block.data.ndim == 4:
+                        phi_red = block.data
+                        phi_cart = np.zeros((natom, 3, natom, 3), dtype=complex)
+                        for i in range(natom):
+                            for j in range(natom):
+                                # standard coordinate transform: rprimd^-T * Phi_red * rprimd^-1
+                                phi_cart[i, :, j, :] = mat_MP @ phi_red[i, :, j, :] @ mat_MP.T
+                        
                         qpoints_list.append(block.qpt)
-                        dynmat_real = block.data
-                        dynmat_imag = np.zeros_like(dynmat_real)
-                        dynmat_complex = np.stack([dynmat_real, dynmat_imag], axis=-1)
+                        dynmat_complex = np.stack([phi_cart.real, phi_cart.imag], axis=-1)
                         dynmat_list.append(dynmat_complex)
                         
                         if np.allclose(block.qpt, 0):
-                            ifcs = block.data
+                            ifcs = phi_cart.real
+                
+                # 2. Extract Born Effective Charges and Dielectric Tensor (only from q=0 block)
+                if block.raw_lines and np.allclose(block.qpt, 0):
+                    # Parse mixed terms from raw lines
+                    d2E_atom_E = np.zeros((natom, 3, 3))
+                    d2E_E_E = np.zeros((3, 3))
+                    for line in block.raw_lines:
+                        parts = line.split()
+                        if len(parts) < 6: continue
+                        try:
+                            idir1, ipert1, idir2, ipert2 = map(int, parts[:4])
+                            ar = float(parts[4].replace('D', 'E').replace('d', 'e'))
+                            
+                            if 1 <= ipert1 <= natom and ipert2 == natom + 2:
+                                d2E_atom_E[ipert1-1, idir1-1, idir2-1] = ar
+                            elif ipert1 == natom + 2 and 1 <= ipert2 <= natom:
+                                d2E_atom_E[ipert2-1, idir2-1, idir1-1] = ar
+                            elif ipert1 == natom + 2 and ipert2 == natom + 2:
+                                d2E_E_E[idir1-1, idir2-1] = ar
+                        except (ValueError, IndexError):
+                            continue
+
+                    # Transform Born Effective Charges: Z_cart = trans_ME @ Z_red @ trans_MP.T
+                    for iat in range(natom):
+                        # Z_red[elec_dir, atom_dir] = d2E_atom_E[iat, atom_dir, elec_dir]
+                        Z_red = d2E_atom_E[iat].T
+                        Z_cart = mat_ME @ Z_red @ mat_MP.T
+                        zeff[iat, :, :] = Z_cart
+                        # Add ionic charge
+                        for i in range(3):
+                            zeff[iat, i, i] += zion[typat[iat]-1]
+                            
+                    # 3. Expand Born charges by symmetry if partial
+                    symrel = self.data.get('symrel')
+                    if symrel is not None:
+                        # Build atom mapping
+                        # If tnons not in DDB header, assume all are zero (standard for many DDBs)
+                        tnons = self.data.get('tnons', np.zeros((len(symrel), 3)))
+                        indsym = build_atom_mapping(self.data['xred'], symrel, tnons)
+                        self.data['atom_mapping'] = indsym
+                        zeff = expand_zeff_by_symmetry(zeff, symrel, indsym, rprimd)
+                    
+                    # 4. Enforce Charge Acoustic Sum Rule (CHASR)
+                    zsum = np.sum(zeff, axis=0) / natom
+                    for iat in range(natom):
+                        zeff[iat, :, :] -= zsum
+                    
+                    # Transform Dielectric Tensor: eps = 1 - 4pi/vol * (ME @ alpha_red @ ME.T)
+                    alpha_cart = mat_ME @ d2E_E_E @ mat_ME.T
+                    epsilon_inf = np.eye(3) - 4.0 * np.pi / ucvol * alpha_cart
             
             elif block.typ == 'd1E_xx':
                 if isinstance(block.data, dict):
-                    if 'fcart' in block.data:
-                        fcart = block.data['fcart']
+                    if 'fred' in block.data:
+                        fred = block.data['fred']
+                        # Transform forces: f_cart = fred @ inv_rprimd
+                        fcart = fred @ np.linalg.inv(rprimd)
                     if 'strten' in block.data:
                         strten = block.data['strten']
         
-        # Average zeff from both terms (dtech9 formula)
-        zeff = zeff / 2.0
-        
-        # Convert lists to arrays
-        if qpoints_list:
-            qpoints = np.array(qpoints_list)  # (nqpt, 3) in C-order
-            nqpt = len(qpoints_list)
-            
-            # Stack dynamical matrices: (nqpt, natom, 3, natom, 3, 2) in C-order
-            # Each element is (natom, 3, natom, 3, 2)
-            dynmat = np.stack(dynmat_list, axis=0)
-            
-            # Infer ngqpt from the q-point coordinates
-            # Find smallest non-zero |q| component to determine grid size
-            ngqpt = self._infer_ngqpt(qpoints)
-        else:
-            qpoints = None
-            dynmat = None
-            nqpt = 0
-            ngqpt = np.array([1, 1, 1], dtype=int)
-        
+        # Store extracted quantities
         self.data['epsilon_inf'] = epsilon_inf
         self.data['zeff'] = zeff
         self.data['ifcs'] = ifcs
@@ -659,10 +617,10 @@ class DDBParser:
         self.data['strten'] = strten
         self.data['fcart'] = fcart
         self.data['energy'] = energy
-        self.data['nqpt'] = nqpt
-        self.data['qpoints'] = qpoints
-        self.data['dynmat'] = dynmat
-        self.data['ngqpt'] = ngqpt
+        self.data['nqpt'] = len(qpoints_list)
+        self.data['qpoints'] = np.array(qpoints_list) if qpoints_list else None
+        self.data['dynmat'] = np.stack(dynmat_list, axis=0) if dynmat_list else None
+        self.data['ngqpt'] = self._infer_ngqpt(np.array(qpoints_list)) if qpoints_list else np.array([1, 1, 1])
     
     def _infer_ngqpt(self, qpoints: np.ndarray) -> np.ndarray:
         """
@@ -711,7 +669,7 @@ class DDBParser:
         )
 
         gamma_ifcs = np.array(self.data.get('ifcs', np.zeros((natom, 3, natom, 3))), dtype=float)
-        ifc_total = np.transpose(gamma_ifcs, (1, 0, 3, 2))[:, :, :, :, np.newaxis]
+        ifc_total = gamma_ifcs[:, :, :, :, np.newaxis]
         ifc_data = IFCData(
             nrpt=1,
             cell=np.zeros((3, 1), dtype=int),
@@ -728,7 +686,7 @@ class DDBParser:
             ifcs=ifc_data,
             epsilon_inf=self.data.get('epsilon_inf', np.eye(3)),
             elastic_constants=self.data.get('elastic_constants', np.zeros((6, 6))),
-            zeff=self.data.get('zeff', np.zeros((3, 3, natom))),
+            zeff=self.data.get('zeff', np.zeros((natom, 3, 3))),
             acell=acell,
             qpoints=self.data.get('qpoints', None),
             dynmat=self.data.get('dynmat', None),
@@ -737,6 +695,7 @@ class DDBParser:
             symrel=symrel_raw,
             nqshft=1,
             q1shft=np.zeros((1, 3)),
+            atom_mapping=self.data.get('atom_mapping', None),
         )
 
 

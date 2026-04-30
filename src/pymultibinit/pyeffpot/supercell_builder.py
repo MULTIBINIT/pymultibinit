@@ -20,23 +20,17 @@ from .datastructures import (
     IFCData
 )
 from .dipdip import build_dipole_dipole_ifcs
+from .symmetry import build_atom_mapping, rotate_dynamical_matrix_full
 
 
 def _find_bound_supercell(ncell: int) -> Tuple[int, int]:
-    """
-    Find R-point bounds for supercell.
-    
-    For even ncell (e.g., 2): min = -1, max = 2
-    For odd ncell (e.g., 3):  min = -1, max = 1
-    
-    Matches ABINIT's findBound_supercell function.
-    """
+    # Fortran findBound_supercell (m_supercell.F90 line 670)
+    # Assumes initial min=0, max=0 (else branch always taken):
+    #   min = -(ncell)/2; max = -min; if even: min = min + 1
+    min_val = -(ncell // 2)
+    max_val = -min_val
     if ncell % 2 == 0:
-        min_val = -ncell // 2
-        max_val = ncell // 2
-    else:
-        min_val = -(ncell - 1) // 2
-        max_val = (ncell - 1) // 2
+        min_val += 1
     return min_val, max_val
 
 
@@ -148,39 +142,12 @@ def _expand_dynmat_to_full_bz(
     qibz: np.ndarray,
     dynmat_ibz: np.ndarray,
     qbz: np.ndarray,
-    symrel: np.ndarray
+    symrel: np.ndarray,
+    rprimd: np.ndarray,
+    xred: np.ndarray,
+    tnons: np.ndarray,
+    use_rotation: bool = True
 ) -> np.ndarray:
-    """
-    Expand dynamical matrices from irreducible BZ to full BZ using symmetry.
-    
-    Implements ABINIT's symdm9 algorithm: for each q in the full BZ, find
-    an irreducible q_ibz and symmetry S such that q = S * q_ibz (or -S*q_ibz
-    for time reversal), then use D(q) from D(q_ibz).
-    
-    NOTE: This function does NOT rotate the dynamical matrix; it only finds
-    which irreducible q-point maps to each full BZ q-point. For the Fourier
-    transform, we only need the correct assignment of D(q) values.
-    
-    For a simple cubic lattice the symmetry operations are integer matrices
-    acting on reciprocal coordinates: q_sym = symrec @ q_ibz where
-    symrec = symrel^{-T} (for orthogonal symrel, symrec = symrel).
-    
-    Parameters
-    ----------
-    qibz : (nqibz, 3) array
-        Irreducible q-points (from DDB)
-    dynmat_ibz : (nqibz, natom, 3, natom, 3, 2) array
-        Dynamical matrices at irreducible q-points
-    qbz : (nqbz, 3) array
-        Full BZ q-points
-    symrel : (nsym, 3, 3) int array
-        Symmetry operations (in reduced coordinates)
-        
-    Returns
-    -------
-    dynmat_bz : (nqbz, natom, 3, natom, 3, 2) array
-        Dynamical matrices at all full BZ q-points
-    """
     nqibz = len(qibz)
     nqbz = len(qbz)
     natom = dynmat_ibz.shape[1]
@@ -189,6 +156,16 @@ def _expand_dynmat_to_full_bz(
     
     dynmat_bz = np.zeros((nqbz, natom, 3, natom, 3, 2))
     found = np.zeros(nqbz, dtype=bool)
+    
+    do_rotation = use_rotation and tnons is not None
+    if do_rotation:
+        indsym = build_atom_mapping(xred, symrel, tnons, tol=1e-6)
+    else:
+        indsym = None
+    
+    symrec = np.zeros_like(symrel, dtype=float)
+    for isym in range(nsym):
+        symrec[isym] = np.linalg.inv(symrel[isym]).T
     
     for iqbz in range(nqbz):
         q = qbz[iqbz]
@@ -199,27 +176,35 @@ def _expand_dynmat_to_full_bz(
             q_irr = qibz[iqibz]
             
             for isym in range(nsym):
-                S = symrel[isym].astype(float)
-                # q_sym = S @ q_irr (symrec for cubic = symrel since symrel is orthogonal)
-                q_sym = S @ q_irr
+                S_rec = symrec[isym]
+                q_sym = S_rec @ q_irr
                 
-                # Check direct match
                 diff = q - q_sym
                 diff -= np.round(diff)
                 if np.max(np.abs(diff)) < tol:
-                    dynmat_bz[iqbz] = dynmat_ibz[iqibz]
+                    if do_rotation and indsym is not None:
+                        dynmat_bz[iqbz] = rotate_dynamical_matrix_full(
+                            dynmat_ibz[iqibz], q_irr, symrel[isym], tnons[isym],
+                            indsym[:, isym, :], rprimd, time_reversal=False, q_target=q
+                        )
+                    else:
+                        dynmat_bz[iqbz] = dynmat_ibz[iqibz]
                     found[iqbz] = True
                     break
                 
-                # Check time-reversal: q = -S @ q_irr => D(q) = D(-q) = D*(q_irr)
                 q_sym_tr = -q_sym
                 diff_tr = q - q_sym_tr
                 diff_tr -= np.round(diff_tr)
                 if np.max(np.abs(diff_tr)) < tol:
-                    # D(q) = D(-q) = conj(D(q_irr)) for time reversal
-                    dm = dynmat_ibz[iqibz].copy()
-                    dm[..., 1] = -dm[..., 1]  # conjugate: flip imaginary part
-                    dynmat_bz[iqbz] = dm
+                    if do_rotation and indsym is not None:
+                        dynmat_bz[iqbz] = rotate_dynamical_matrix_full(
+                            dynmat_ibz[iqibz], q_irr, symrel[isym], tnons[isym],
+                            indsym[:, isym, :], rprimd, time_reversal=True, q_target=q
+                        )
+                    else:
+                        dm = dynmat_ibz[iqibz].copy()
+                        dm[..., 1] = -dm[..., 1]
+                        dynmat_bz[iqbz] = dm
                     found[iqbz] = True
                     break
         
@@ -308,10 +293,12 @@ def _apply_phase_shift(
     diff_trans = trans[:, np.newaxis, :] - trans[np.newaxis, :, :]  # (natom, natom, 3)
 
     # phase_arg[q, a, b] = kk[q] . diff_trans[a, b]
+    # Here kk is 2pi*q_cart, and diff_trans is R_cart. 
+    # So phase_arg is already the full phase (dimensionless, 2pi-scaled).
     phase_arg = np.einsum('qi,abi->qab', kk, diff_trans)  # (nqpt, natom, natom)
 
-    phase_re = np.cos(2 * np.pi * phase_arg)  # (nqpt, natom, natom)
-    phase_im = np.sin(2 * np.pi * phase_arg)
+    phase_re = np.cos(phase_arg)  # (nqpt, natom, natom)
+    phase_im = np.sin(phase_arg)
 
     # dynmat: (nqpt, natom, 3, natom, 3, 2) — last dim is [re, im]
     re = dynmat[..., 0]  # (nqpt, natom, 3, natom, 3)
@@ -333,92 +320,218 @@ def _ftifc_q2r(
     cell: np.ndarray
 ) -> np.ndarray:
     """
-    Fourier transform from q-space to R-space (ABINIT ftifc_q2r).
+    Fourier transform from q-space to R-space (Pure Lattice).
     
-    Phi(R) = (1/N_q) * Sum_q exp(i*2*pi*q*R) * D(q)
-    
-    Parameters
-    ----------
-    dynmat : (nqpt, natom, 3, natom, 3, 2) array
-        Dynamical matrices [real, imag] for FULL BZ
-    qpoints : (nqpt, 3) array
-        Full BZ q-point coordinates
-    gprim : (3, 3) array
-        Reciprocal lattice vectors
-    cell : (3, nrpt) array
-        R-point cell indices (from bigbx9)
-        
-    Returns
-    -------
-    atmfrc : (3, natom, 3, natom, nrpt) array
-        Real-space IFCs (real-valued)
+    Phi(R) = (1/N_q) * Sum_q exp(-i*2*pi*q*R) * D_shifted(q)
     """
     nqpt = len(qpoints)
     nrpt = cell.shape[1]
 
-    # kk[q, 3] = gprim @ q  (Cartesian reciprocal)
-    kk = qpoints @ gprim.T  # (nqpt, 3)
+    # phase_arg[q, R] = q . cell[R]
+    phase_arg = qpoints @ cell  # (nqpt, nrpt) 
+    phase_c = np.exp(-2j * np.pi * phase_arg)
 
-    # rpt[3, nrpt] -> rpt.T = (nrpt, 3)
-    rpt = cell.T.astype(float)  # (nrpt, 3)
+    # Use complex dynmat directly
+    if dynmat.dtype == complex:
+        D_c = dynmat
+    else:
+        D_c = dynmat[..., 0] + 1j * dynmat[..., 1] # (nqpt, natom, 3, natom, 3)
+    
+    # Sum over q: 
+    # phase_c: (q, r), D_c: (q, ia, mu, ib, nu)
+    # result: (ia, mu, ib, nu, r)
+    atmfrc_c = np.einsum('qr,qijkl->ijklr', phase_c, D_c) / nqpt
 
-    # phase_arg[q, R] = kk[q] . rpt[R]
-    phase_arg = kk @ rpt.T  # (nqpt, nrpt)
-
-    phase_re = np.cos(2 * np.pi * phase_arg)  # (nqpt, nrpt)
-    phase_im = np.sin(2 * np.pi * phase_arg)
-
-    # dynmat: (nqpt, natom, 3, natom, 3, 2)
-    # Convert to complex: D_c[q, ia, mu, ib, nu]
-    D_re = dynmat[..., 0]  # (nqpt, natom, 3, natom, 3)
-    D_im = dynmat[..., 1]
-    D_c = D_re + 1j * D_im  # (nqpt, natom, 3, natom, 3)
-
-    # phase_c[q, R] = phase_re + i*phase_im
-    phase_c = phase_re + 1j * phase_im  # (nqpt, nrpt)
-
-    # Sum over q: atmfrc_c[ia, mu, ib, nu, R] = sum_q phase_c[q,R] * D_c[q, ia, mu, ib, nu]
-    # Use einsum: 'qr,qabcd->abcdr' where D_c has shape (nqpt, natom, 3, natom, 3)
-    atmfrc_c = np.einsum('qr,qijkl->ijklr', phase_c, D_c) / nqpt  # (natom, 3, natom, 3, nrpt)
-
-    # atmfrc_c is real (imaginary part should be ~0 for physical IFCs)
-    # Transpose from (ia, mu, ib, nu, R) to (mu, ia, nu, ib, R)
-    atmfrc = np.real(atmfrc_c).transpose(1, 0, 3, 2, 4)  # (3, natom, 3, natom, nrpt)
-
-    return atmfrc
+    return np.real(atmfrc_c)
 
 
-def _apply_asr_to_array(atmfrc: np.ndarray) -> np.ndarray:
+def _compute_rpoint_weights(
+    cell: np.ndarray,
+    rprimd: np.ndarray,
+    rcan: np.ndarray,
+    ngqpt: np.ndarray,
+    nqbz: int,
+    toldist: float = 1e-8,
+) -> np.ndarray:
     """
-    Apply acoustic sum rule.
-    
-    Ensures translational invariance: Sum_{j,R} Phi(mu, i, nu, j, R) = 0
-    
+    Compute Wigner-Seitz weights for R-points (wght9 for brav=1).
+
+    Translated from ABINIT m_dynmat.F90 wght9 (brav=1 branch).
+
+    For each (ia, ib, irpt), the weight is determined by testing whether
+    the displacement vector rdiff = tau_ib - tau_ia + R lies inside the
+    Wigner-Seitz cell of the q-point superlattice (ngqpt * rprimd).
+
+    Weight assignment:
+      - Inside WS cell:           weight = 1.0
+      - On one boundary plane:    weight = 1/2
+      - On two boundary planes:   weight = 1/3
+      - On N boundary planes:     weight = 1/(N+1)
+      - Outside WS cell:          weight = 0.0
+
     Parameters
     ----------
-    atmfrc : (3, natom, 3, natom, nrpt) array
-        Real-space IFCs
-        
+    cell : (3, nrpt) integer cell indices for each R-point
+    rprimd : (3, 3) real-space lattice vectors
+    rcan : (natom, 3) canonical Cartesian positions
+    ngqpt : (3,) q-point grid dimensions
+    nqbz : total number of q-points in full BZ
+    toldist : tolerance for boundary detection
+
     Returns
     -------
-    atmfrc : (3, natom, 3, natom, nrpt) array
-        ASR-corrected IFCs
+    wghatm : (natom, natom, nrpt) Wigner-Seitz weights
+
+    Raises
+    ------
+    RuntimeError if weight sum rule is violated (sum != nqbz)
     """
-    natom = atmfrc.shape[1]
+    natom = rcan.shape[0]
+    nrpt = cell.shape[1]
+
+    # Build WS boundary points from the q-point superlattice.
+    # Each boundary point is pp = n1*ngqpt[0]*a1 + n2*ngqpt[1]*a2 + n3*ngqpt[2]*a3
+    # in Cartesian coordinates. Origin (0,0,0) is excluded (normsq=0).
+    ptws_list = []
+    ptws_normsq_list = []
+    for ii in range(-2, 3):
+        for jj in range(-2, 3):
+            for kk in range(-2, 3):
+                coeff = np.array([ii * ngqpt[0], jj * ngqpt[1], kk * ngqpt[2]],
+                                 dtype=float)
+                pp = rprimd @ coeff  # Cartesian boundary point
+                normsq = np.dot(pp, pp)
+                if normsq > 1e-12:
+                    ptws_list.append(pp)
+                    ptws_normsq_list.append(0.5 * normsq)
+
+    ptws = np.array(ptws_list)           # (nptws, 3)
+    ptws_normsq = np.array(ptws_normsq_list)  # (nptws,)
+
+    # Precompute Cartesian R-vectors from integer cell indices
+    # R_cart = rprimd @ cell_int for each R-point
+    R_cart = (rprimd @ cell).T  # (nrpt, 3)
+
+    wghatm = np.zeros((natom, natom, nrpt))
+
+    for ia in range(natom):
+        for ib in range(natom):
+            # rdiff[irpt] = rcan[ib] - rcan[ia] + R_cart[irpt]
+            rdiff = rcan[ib] - rcan[ia] + R_cart  # (nrpt, 3)
+
+            # Project onto WS boundary points: proj[irpt, ipt] = rdiff[irpt] · ptws[ipt]
+            proj = rdiff @ ptws.T  # (nrpt, nptws)
+
+            # diff_from_boundary[irpt, ipt] = proj - 0.5*|pp|^2
+            diff_from_boundary = proj - ptws_normsq[np.newaxis, :]  # (nrpt, nptws)
+
+            # Outside WS cell: any boundary test fails (point is closer to pp than origin)
+            outside = np.any(diff_from_boundary > toldist, axis=1)  # (nrpt,)
+
+            # Count equidistant boundaries (point lies on the perpendicular bisector)
+            equidistant = np.sum(np.abs(diff_from_boundary) <= toldist,
+                                 axis=1)  # (nrpt,)
+
+            # Weight = 1 / (1 + n_equidistant) if inside, 0 if outside
+            nreq = 1 + equidistant
+            weight = np.where(outside, 0.0, 1.0 / nreq.astype(float))
+
+            wghatm[ia, ib, :] = weight
+
+    # Verify sum rule: sum_{irpt} wghatm[ia, ib, irpt] == nqbz
+    for ia in range(natom):
+        for ib in range(natom):
+            total = np.sum(wghatm[ia, ib, :])
+            if abs(total - nqbz) > 1e-6:
+                raise RuntimeError(
+                    f"Weight sum rule violated for ({ia},{ib}): "
+                    f"sum={total:.6f}, expected={nqbz}"
+                )
+
+    return wghatm
+
+
+def _filter_rpoints_by_weights(
+    wghatm: np.ndarray,
+    cell: np.ndarray,
+    atmfrc: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Filter out R-points where all weights are zero (cutmode=1).
+
+    Matches ABINIT get_bigbox_and_weights filtering: an R-point is removed
+    if sum(|wghatm[:,:,irpt]|) < tol20 for all atom pairs.
+
+    Parameters
+    ----------
+    wghatm : (natom, natom, nrpt) Wigner-Seitz weights
+    cell : (3, nrpt) integer cell indices
+    atmfrc : (natom, 3, natom, 3, nrpt) real-space IFCs
+
+    Returns
+    -------
+    cell_filtered : (3, nrpt_filtered)
+    atmfrc_filtered : (natom, 3, natom, 3, nrpt_filtered)
+    wghatm_filtered : (natom, natom, nrpt_filtered)
+    """
+    tol20 = 1e-20
+
+    # Keep R-points where at least one weight is non-zero
+    has_weight = np.sum(np.abs(wghatm), axis=(0, 1)) > tol20  # (nrpt,)
+
+    return (cell[:, has_weight],
+            atmfrc[:, :, :, :, has_weight],
+            wghatm[:, :, has_weight])
+
+
+def _apply_asr_weighted(
+    atmfrc: np.ndarray,
+    cell: np.ndarray,
+    wghatm: np.ndarray,
+) -> np.ndarray:
+    """
+    Apply weighted acoustic sum rule (asrif9 with asr=1).
+
+    Translated from ABINIT m_dynmat.F90 asrif9.
+
+    For each (mu, nu, ia):
+      sumifc = sum_{ib, irpt} wghatm(ia, ib, irpt) * atmfrc(ia, mu, ib, nu, irpt)
+      atmfrc(ia, mu, ia, nu, izero) -= sumifc
+
+    where izero is the index of R=(0,0,0).
+
+    Parameters
+    ----------
+    atmfrc : (natom, 3, natom, 3, nrpt) real-space IFCs
+    cell : (3, nrpt) integer cell indices
+    wghatm : (natom, natom, nrpt) Wigner-Seitz weights
+
+    Returns
+    -------
+    atmfrc : ASR-corrected IFCs (modified in-place)
+    """
+    natom = atmfrc.shape[0]
     nrpt = atmfrc.shape[4]
-    
-    for mu in range(3):
-        for ia in range(natom):
-            total = 0.0
-            for nu in range(3):
-                for ib in range(natom):
-                    total += np.sum(atmfrc[mu, ia, nu, ib, :])
-            
-            correction = total / (3 * natom * nrpt)
-            for nu in range(3):
-                for ib in range(natom):
-                    atmfrc[mu, ia, nu, ib, :] -= correction
-    
+
+    # Find R=(0,0,0) index
+    izero = None
+    for irpt in range(nrpt):
+        if np.all(np.abs(cell[:, irpt]) < 1e-10):
+            izero = irpt
+            break
+
+    if izero is None:
+        raise ValueError("R=(0,0,0) not found in R-point grid")
+
+    # Compute weighted sum: sumifc[ia, mu, nu] = sum_{ib,irpt} wghatm * atmfrc
+    # wghatm: (natom, natom, nrpt) → expand to (natom, 1, natom, 1, nrpt)
+    w = wghatm[:, np.newaxis, :, np.newaxis, :]
+    sumifc = np.sum(w * atmfrc, axis=(2, 4))  # (natom, 3, 3)
+
+    # Correct self-interaction at R=(0,0,0)
+    for ia in range(natom):
+        atmfrc[ia, :, ia, :, izero] -= sumifc[ia]
+
     return atmfrc
 
 
@@ -446,7 +559,7 @@ def _compute_dipdip_per_rpoint(
         
     Returns
     -------
-    ewald_atmfrc : (3, natom_uc, 3, natom_uc, nrpt) array
+    ewald_atmfrc : (natom_uc, 3, natom_uc, 3, nrpt) array
         Dipole-dipole IFCs for each R-point (unitcell basis)
     """
     from .dipdip import ewald_dipole_dipole_for_rpoint
@@ -460,9 +573,9 @@ def _compute_dipdip_per_rpoint(
     xcart_uc = unitcell.xcart
     
     if epsilon_inf is None or zeff is None:
-        return np.zeros((3, natom_uc, 3, natom_uc, nrpt))
+        return np.zeros((natom_uc, 3, natom_uc, 3, nrpt))
     
-    ewald_atmfrc = np.zeros((3, natom_uc, 3, natom_uc, nrpt))
+    ewald_atmfrc = np.zeros((natom_uc, 3, natom_uc, 3, nrpt))
     
     volume_sc = np.abs(np.linalg.det(rprimd_sc))
     
@@ -551,8 +664,12 @@ def _build_supercell_ifcs_fourier(
             raise ValueError("No dynamical matrices in unitcell")
         if unitcell.qpoints is None:
             raise ValueError("No q-points in unitcell")
+        tnons = getattr(unitcell, 'tnons', None)
+        if tnons is None:
+            tnons = np.zeros((len(symrel), 3))
         dynmat_bz = _expand_dynmat_to_full_bz(
-            unitcell.qpoints, unitcell.dynmat, qbz, symrel
+            unitcell.qpoints, unitcell.dynmat, qbz, symrel,
+            unitcell.rprimd, unitcell.xred, tnons, use_rotation=True
         )
     
     assert dynmat_bz is not None  # guaranteed by checks above
@@ -564,7 +681,18 @@ def _build_supercell_ifcs_fourier(
     rprimd = unitcell.rprimd
     gprim = 2 * np.pi * np.linalg.inv(rprimd).T
     
-    # Step 4: Canonical coordinate transform + phase shift
+    # Step 4: Subtract ewald from total dynmat in q-space (Fortran ifc_init)
+    # This must happen BEFORE phase shift and FT, matching Fortran exactly.
+    ewald_atmfrc_uc = None
+    if unitcell.epsilon_inf is not None and unitcell.zeff is not None:
+        if np.linalg.norm(unitcell.zeff) > 1e-10:
+            from .dipdip import compute_dipdip_dynmat
+            for iq in range(nqbz):
+                ewald_q = compute_dipdip_dynmat(qbz[iq], unitcell, sumg0=0)
+                dynmat_bz[iq, ..., 0] -= ewald_q.real
+                dynmat_bz[iq, ..., 1] -= ewald_q.imag
+
+    # Step 5: Canonical coordinate transform + phase shift
     rcan, trans = _canonical_coordinates(unitcell.xred, unitcell.rprimd)
     
     dynmat_shifted = _apply_phase_shift(
@@ -574,84 +702,156 @@ def _build_supercell_ifcs_fourier(
         trans
     )
     
-    # Step 5: Fourier transform full BZ → R-points
+    # Step 6: FT (output is short-range since ewald subtracted at Step 4)
     total_atmfrc_uc = _ftifc_q2r(
         dynmat_shifted,
         qbz,
         gprim,
-        cell_rpt
+        cell_rpt,
     )
-    
-    # Step 6: Compute dipole-dipole for each R-point using SUPERCELL geometry
-    # The dipole-dipole is computed at Gamma of the supercell BZ
-    ewald_atmfrc_uc = np.zeros_like(total_atmfrc_uc)
-    if unitcell.epsilon_inf is not None and unitcell.zeff is not None:
-        if np.linalg.norm(unitcell.zeff) > 1e-10:
-            ewald_atmfrc_uc = _compute_dipdip_per_rpoint(
-                unitcell, cell_rpt, crystal_sc.rprimd
-            )
-    
-    # Step 7: Extract short-range IFCs
-    short_atmfrc_uc = total_atmfrc_uc - ewald_atmfrc_uc
-    
-    # Step 8: Apply ASR to short-range
-    short_atmfrc_uc = _apply_asr_to_array(short_atmfrc_uc)
-    
-    # Step 9: Combine
-    atmfrc_uc = short_atmfrc_uc + ewald_atmfrc_uc
-    
-    # Step 10: Replicate to supercell using ncell
-    nx, ny, nz = ncell
-    
-    # Generate supercell R-points (same grid as bigbx9 R-points, used for indexing)
-    cell_sc = _generate_supercell_rpoints(ncell)
-    nrpt_sc = cell_sc.shape[1]
-    
-    atmfrc_sc = np.zeros((3, natom_sc, 3, natom_sc, nrpt_sc))
-    short_atmfrc_sc = np.zeros((3, natom_sc, 3, natom_sc, nrpt_sc))
-    ewald_atmfrc_sc = np.zeros((3, natom_sc, 3, natom_sc, nrpt_sc))
-    
-    # Build lookup: cell index -> R-point index in bigbx9 grid
-    cell_dict = {}
+
+    # Step 7: Compute Wigner-Seitz weights (wght9 for brav=1)
+    wghatm = _compute_rpoint_weights(
+        cell_rpt, rprimd, rcan, ngqpt, nqbz
+    )
+
+    # Step 8: Filter zero-weight R-points (cutmode=1)
+    tol20 = 1e-20
+    has_weight = np.sum(np.abs(wghatm), axis=(0, 1)) > tol20
+    cell_rpt = cell_rpt[:, has_weight]
+    total_atmfrc_uc = total_atmfrc_uc[:, :, :, :, has_weight]
+    wghatm = wghatm[:, :, has_weight]
+    nrpt = cell_rpt.shape[1]
+
+    # Step 9: total_atmfrc_uc is already short-range (ewald subtracted in q-space at Step 4)
+    short_atmfrc_uc = total_atmfrc_uc
+
+    # Step 10: Apply weighted ASR to short-range (asrif9 with asr=1)
+    short_atmfrc_uc = _apply_asr_weighted(short_atmfrc_uc, cell_rpt, wghatm)
+
+    # --- Phase 2: generateDipDip (m_effective_potential.F90 lines 634-1176) ---
+    # Map short-range to union R-point grid, combine with ewald, apply
+    # second unweighted ASR (harmonics_terms_applySumRule), then replicate.
+
+    # Step 11: Union of bigbx9 and supercell R-point ranges (generateDipDip lines 1001-1031)
+    uc_min = cell_rpt.min(axis=1)
+    uc_max = cell_rpt.max(axis=1)
+    sc_min1, sc_max1 = _find_bound_supercell(ncell[0])
+    sc_min2, sc_max2 = _find_bound_supercell(ncell[1])
+    sc_min3, sc_max3 = _find_bound_supercell(ncell[2])
+    sc_min = np.array([sc_min1, sc_min2, sc_min3])
+    sc_max = np.array([sc_max1, sc_max2, sc_max3])
+    union_min = np.minimum(uc_min, sc_min)
+    union_max = np.maximum(uc_max, sc_max)
+
+    union_rpts = []
+    for i1 in range(int(union_min[0]), int(union_max[0]) + 1):
+        for i2 in range(int(union_min[1]), int(union_max[1]) + 1):
+            for i3 in range(int(union_min[2]), int(union_max[2]) + 1):
+                union_rpts.append([i1, i2, i3])
+    cell_union = np.array(union_rpts, dtype=int).T
+    nrpt_union = cell_union.shape[1]
+
+    # Step 12: Map short-range to union R-points (coordinate matching)
+    uc_rpt_lookup = {}
     for irpt in range(nrpt):
         key = (int(cell_rpt[0, irpt]), int(cell_rpt[1, irpt]), int(cell_rpt[2, irpt]))
-        cell_dict[key] = irpt
-    
+        uc_rpt_lookup[key] = irpt
+
+    short_atmfrc_union = np.zeros((natom_uc, 3, natom_uc, 3, nrpt_union))
+    for irpt_u in range(nrpt_union):
+        r = cell_union[:, irpt_u]
+        key = (int(r[0]), int(r[1]), int(r[2]))
+        if key in uc_rpt_lookup:
+            irpt_uc = uc_rpt_lookup[key]
+            short_atmfrc_union[:, :, :, :, irpt_u] = short_atmfrc_uc[:, :, :, :, irpt_uc]
+
+    # Step 13: Ewald for union R-points (supercell geometry)
+    ewald_atmfrc_union = np.zeros((natom_uc, 3, natom_uc, 3, nrpt_union))
+    if unitcell.epsilon_inf is not None and unitcell.zeff is not None:
+        if np.linalg.norm(unitcell.zeff) > 1e-10:
+            ewald_atmfrc_union = _compute_dipdip_per_rpoint(
+                unitcell, cell_union, crystal_sc.rprimd
+            )
+
+    # Step 14: Combine short-range + ewald at union R-points
+    atmfrc_union = short_atmfrc_union + ewald_atmfrc_union
+
+    # Step 15: Unweighted ASR (m_harmonics_terms.F90 lines 724-820)
+    # sum_{ib, irpt} atmfrc[ia, mu, ib, nu, irpt]; subtract from R=0 diagonal
+    izero_union = None
+    for irpt_u in range(nrpt_union):
+        if np.all(np.abs(cell_union[:, irpt_u]) < 1e-10):
+            izero_union = irpt_u
+            break
+
+    if izero_union is not None:
+        for mu in range(3):
+            for nu in range(3):
+                for ia in range(natom_uc):
+                    s = 0.0
+                    for ib in range(natom_uc):
+                        for irpt_u in range(nrpt_union):
+                            s += atmfrc_union[ia, mu, ib, nu, irpt_u]
+                    atmfrc_union[ia, mu, ia, nu, izero_union] -= s
+
+    # Step 16: Replicate to supercell (fold union R-points into supercell grid)
+    nx, ny, nz = ncell
+    cell_sc = _generate_supercell_rpoints(ncell)
+    nrpt_sc = cell_sc.shape[1]
+
+    atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_sc))
+    short_atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_sc))
+    ewald_atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_sc))
+
+    sc_rpt_lookup = {}
+    sc_bounds = []
+    for dim in range(3):
+        mn, mx = _find_bound_supercell(ncell[dim])
+        sc_bounds.append((mn, mx))
     for irpt_sc in range(nrpt_sc):
-        cell_shift = cell_sc[:, irpt_sc]
-        key = (int(cell_shift[0]), int(cell_shift[1]), int(cell_shift[2]))
-        
-        if key not in cell_dict:
-            # R-point not in bigbx9 grid — skip (IFC is effectively zero beyond cutoff)
-            continue
-        
-        irpt_uc = cell_dict[key]
-        
+        key = (int(cell_sc[0, irpt_sc]), int(cell_sc[1, irpt_sc]), int(cell_sc[2, irpt_sc]))
+        sc_rpt_lookup[key] = irpt_sc
+
+    def _fold_to_sc(r, dim):
+        mn, _ = sc_bounds[dim]
+        n = ncell[dim]
+        return ((r - mn) % n) + mn
+
+    for irpt_u in range(nrpt_union):
+        r1, r2, r3 = int(cell_union[0, irpt_u]), int(cell_union[1, irpt_u]), int(cell_union[2, irpt_u])
+
+        r1_sc = _fold_to_sc(r1, 0)
+        r2_sc = _fold_to_sc(r2, 1)
+        r3_sc = _fold_to_sc(r3, 2)
+        irpt_sc = sc_rpt_lookup[(r1_sc, r2_sc, r3_sc)]
+
         for i_uc in range(natom_uc):
             for j_uc in range(natom_uc):
-                ifc_uc = atmfrc_uc[:, i_uc, :, j_uc, irpt_uc]
-                short_ifc_uc = short_atmfrc_uc[:, i_uc, :, j_uc, irpt_uc]
-                ewald_ifc_uc = ewald_atmfrc_uc[:, i_uc, :, j_uc, irpt_uc]
-                
+                ifc_u = atmfrc_union[i_uc, :, j_uc, :, irpt_u]
+                short_u = short_atmfrc_union[i_uc, :, j_uc, :, irpt_u]
+                ewald_u = ewald_atmfrc_union[i_uc, :, j_uc, :, irpt_u]
+
                 for ix in range(nx):
                     for iy in range(ny):
                         for iz in range(nz):
                             i_sc = i_uc + natom_uc * (ix + nx * (iy + ny * iz))
-                            jx = (ix + int(cell_shift[0])) % nx
-                            jy = (iy + int(cell_shift[1])) % ny
-                            jz = (iz + int(cell_shift[2])) % nz
+                            jx = (ix + r1) % nx
+                            jy = (iy + r2) % ny
+                            jz = (iz + r3) % nz
                             j_sc = j_uc + natom_uc * (jx + nx * (jy + ny * jz))
-                            
-                            atmfrc_sc[:, i_sc, :, j_sc, irpt_sc] = ifc_uc
-                            short_atmfrc_sc[:, i_sc, :, j_sc, irpt_sc] = short_ifc_uc
-                            ewald_atmfrc_sc[:, i_sc, :, j_sc, irpt_sc] = ewald_ifc_uc
-    
+
+                            atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += ifc_u
+                            short_atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += short_u
+                            ewald_atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += ewald_u
+
     return IFCData(
         nrpt=nrpt_sc,
         cell=cell_sc,
         atmfrc=atmfrc_sc,
         short_atmfrc=short_atmfrc_sc,
-        ewald_atmfrc=ewald_atmfrc_sc
+        ewald_atmfrc=ewald_atmfrc_sc,
+        wghatm=wghatm,
     )
 
 
@@ -772,15 +972,15 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
     nrpt_uc = ifcs_uc.nrpt
     
     nrpt_sc = nrpt_uc
-    atmfrc_sc = np.zeros((3, natom_sc, 3, natom_sc, nrpt_sc))
-    short_atmfrc_sc = np.zeros((3, natom_sc, 3, natom_sc, nrpt_sc))
+    atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_uc))
+    short_atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_uc))
     cell_sc = ifcs_uc.cell.copy()
     
     for irpt in range(nrpt_uc):
         cell_shift = ifcs_uc.cell[:, irpt] if ifcs_uc.cell.ndim == 2 else np.zeros(3, dtype=int)
         for i_uc in range(natom_uc):
             for j_uc in range(natom_uc):
-                ifc_uc = ifcs_uc.short_atmfrc[:, i_uc, :, j_uc, irpt]
+                ifc_uc = ifcs_uc.short_atmfrc[i_uc, :, j_uc, :, irpt]
                 
                 for ix in range(nx):
                     for iy in range(ny):
@@ -791,8 +991,8 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
                             jz = (iz + int(cell_shift[2])) % nz
                             j_sc = j_uc + natom_uc * (jx + nx * (jy + ny * jz))
                             
-                            short_atmfrc_sc[:, i_sc, :, j_sc, irpt] = ifc_uc
-                            atmfrc_sc[:, i_sc, :, j_sc, irpt] = ifc_uc
+                            short_atmfrc_sc[i_sc, :, j_sc, :, irpt] = ifc_uc
+                            atmfrc_sc[i_sc, :, j_sc, :, irpt] = ifc_uc
     
     return IFCData(
         nrpt=nrpt_sc,
@@ -812,7 +1012,7 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
     natom_uc = unitcell.crystal.natom
     nrpt_sc = ifcs_sc.nrpt
     
-    ifcs_sc.ewald_atmfrc = np.zeros((3, natom_sc, 3, natom_sc, nrpt_sc))
+    ifcs_sc.ewald_atmfrc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_sc))
     
     if unitcell.epsilon_inf is None or unitcell.zeff is None:
         return
@@ -821,10 +1021,10 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
         return
     
     ncell_prod = ncell[0] * ncell[1] * ncell[2]
-    zeff_sc = np.zeros((3, 3, natom_sc))
+    zeff_sc = np.zeros((natom_sc, 3, 3))
     for i_sc in range(natom_sc):
         i_uc = i_sc % natom_uc
-        zeff_sc[:, :, i_sc] = unitcell.zeff[:, :, i_uc]
+        zeff_sc[i_sc, :, :] = unitcell.zeff[i_uc, :, :]
     
     dd_ifcs = build_dipole_dipole_ifcs(
         positions_cart=crystal_sc.xcart,
@@ -845,9 +1045,9 @@ def _apply_asr(ifcs_sc: IFCData):
     for irpt in range(ifcs_sc.nrpt):
         for i in range(natom):
             for mu in range(3):
-                sum_ifc = np.sum(ifcs_sc.atmfrc[mu, i, :, :, irpt])
+                sum_ifc = np.sum(ifcs_sc.atmfrc[i, mu, :, :, irpt])
                 correction = sum_ifc / (3 * natom)
-                ifcs_sc.atmfrc[mu, i, :, :, irpt] -= correction
+                ifcs_sc.atmfrc[i, mu, :, :, irpt] -= correction
                 ifcs_sc.short_atmfrc[mu, i, :, :, irpt] -= correction
 
 

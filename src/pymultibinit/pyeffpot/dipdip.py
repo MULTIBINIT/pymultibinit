@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 from typing import Tuple, Optional
+from .datastructures import UnitcellData
 
 
 def dipole_dipole_tensor(rij_cart: np.ndarray, epsilon_inf: np.ndarray) -> np.ndarray:
@@ -63,11 +64,11 @@ def build_dipole_dipole_ifcs_simple(
     Returns
     -------
     np.ndarray
-        Array with shape (3, natom, 3, natom).
+        Array with shape (natom, 3, natom, 3).
     """
     positions_cart = np.asarray(positions_cart, dtype=float)
     natom = positions_cart.shape[0]
-    out = np.zeros((3, natom, 3, natom), dtype=float)
+    out = np.zeros((natom, 3, natom, 3), dtype=float)
 
     for i in range(natom):
         for j in range(natom):
@@ -75,11 +76,11 @@ def build_dipole_dipole_ifcs_simple(
                 continue
             block = dipole_dipole_ifc_block(
                 positions_cart[j] - positions_cart[i],
-                zeff[:, :, i],
-                zeff[:, :, j],
+                zeff[i, :, :],
+                zeff[j, :, :],
                 epsilon_inf,
             )
-            out[:, i, :, j] = block
+            out[i, :, j, :] = block
 
     return out
 
@@ -108,7 +109,7 @@ def ewald_dipole_dipole_gamma(
     epsilon_inf
         High-frequency dielectric tensor, shape (3, 3).
     zeff
-        Born effective charges, shape (3, 3, natom).
+        Born effective charges, shape (natom, 3, 3).
     eta
         Ewald screening parameter (1/Bohr). Controls real/recip balance.
         If None, automatically chosen based on cell size.
@@ -120,7 +121,7 @@ def ewald_dipole_dipole_gamma(
     Returns
     -------
     np.ndarray
-        Dipole-dipole IFCs, shape (3, natom, 3, natom).
+        Dipole-dipole IFCs, shape (natom, 3, natom, 3).
     
     Notes
     -----
@@ -137,7 +138,7 @@ def ewald_dipole_dipole_gamma(
     zeff = np.asarray(zeff, dtype=float)
     
     natom = positions_cart.shape[0]
-    ifcs = np.zeros((3, natom, 3, natom), dtype=float)
+    ifcs = np.zeros((natom, 3, natom, 3), dtype=float)
     
     # Volume
     volume = np.abs(np.linalg.det(lattice_vectors))
@@ -158,7 +159,9 @@ def ewald_dipole_dipole_gamma(
     
     # Build reciprocal lattice vectors (exclude Gamma)
     recip_G = _build_lattice_shells(rec_lattice, nrecip)
-    recip_G = recip_G[np.linalg.norm(recip_G, axis=1) > 1e-10]
+    gnorms = np.linalg.norm(recip_G, axis=1)
+    recip_G = recip_G[gnorms > 1e-10]
+    gnorms = gnorms[gnorms > 1e-10]
     
     inv_eps = np.linalg.inv(epsilon_inf)
     
@@ -169,52 +172,58 @@ def ewald_dipole_dipole_gamma(
         erfc = _erfc_approx
     
     # Real-space contribution
-    for i in range(natom):
-        for j in range(natom):
-            for R in real_R:
-                rij = positions_cart[j] - positions_cart[i] + R
-                rnorm = np.linalg.norm(rij)
-                
-                if rnorm < 1e-10:
-                    continue
-                
-                # Screened dipole-dipole tensor
-                rhat = rij / rnorm
-                
-                # Real-space Ewald factor: erfc(eta*r) / r^3 + screening terms
-                erfc_eta_r = float(erfc(eta_val * rnorm))
-                exp_eta_r2 = np.exp(-(eta_val * rnorm)**2)
-                
-                # Full tensor: (3*rhat*rhat - I) * [erfc(eta*r)/r^3 + 2*eta/sqrt(pi)*exp(-(eta*r)^2)/r^2]
-                factor1 = erfc_eta_r / rnorm**3
-                factor2 = 2.0 * eta_val / np.sqrt(np.pi) * exp_eta_r2 / rnorm**2
-                factor = factor1 + factor2
-                
-                dd_tensor = factor * (3.0 * np.outer(rhat, rhat) - np.eye(3))
-                
-                # Add to IFCs
-                block = zeff[:, :, i].T @ dd_tensor @ zeff[:, :, j]
-                ifcs[:, i, :, j] += block
-    
-    # Reciprocal-space contribution (at Gamma, this is the non-analytic part)
-    for G in recip_G:
-        Gnorm = np.linalg.norm(G)
-        if Gnorm < 1e-10:
+    for R in real_R:
+        rij_all = positions_cart[None, :, :] - (positions_cart[:, None, :] - R)
+        rnorms = np.linalg.norm(rij_all, axis=-1)
+        
+        # Mask out zero distances
+        mask = rnorms > 1e-10
+        if not np.any(mask):
             continue
             
-        # Reciprocal-space factor: 4*pi/V * exp(-G^2/(4*eta^2)) / G^2
-        factor = 4.0 * np.pi / volume * np.exp(-Gnorm**2 / (4.0 * eta_val**2)) / Gnorm**2
+        rnorms_m = rnorms[mask]
+        rij_m = rij_all[mask]
+        rhat_m = rij_m / rnorms_m[:, None]
         
-        # Tensor: G*G^T screened by dielectric
-        G_eps = G @ inv_eps
-        GG = np.outer(G, G_eps)
+        erfc_val = erfc(eta_val * rnorms_m)
+        exp_eta_r2 = np.exp(-(eta_val * rnorms_m)**2)
+        factor = erfc_val / rnorms_m**3 + 2.0 * eta_val / np.sqrt(np.pi) * exp_eta_r2 / rnorms_m**2
         
-        # Add contribution
-        for i in range(natom):
-            for j in range(natom):
-                # For Gamma point, phase = 1 for all pairs
-                block = factor * zeff[:, :, i].T @ GG @ zeff[:, :, j]
-                ifcs[:, i, :, j] += block
+        # Tensor: factor * (3*rhat*rhat - I)
+        # Using a temporary for the tensor calculation
+        # Each block is (3,3)
+        ident = np.eye(3)
+        tensors = factor[:, None, None] * (3.0 * np.einsum('mi,mj->mij', rhat_m, rhat_m) - ident[None, :, :])
+        
+        # Map back to ifcs using mask
+        idx_i, idx_j = np.where(mask)
+        
+        # Vectorized block multiplication: 
+        # block[i,j] = zeff[i].T @ tensor[m] @ zeff[j]
+        # Using einsum: 'imk, mkp, jpr -> imjr'
+        blocks = np.einsum('mik, mkp, mpr -> mir', zeff[idx_i].transpose(0, 2, 1), tensors, zeff[idx_j])
+        ifcs[idx_i, :, idx_j, :] += blocks
+    
+    # Reciprocal-space contribution
+    if len(recip_G) > 0:
+        inv_eps = np.linalg.inv(epsilon_inf)
+        
+        # G_eps = G @ inv_eps
+        G_eps = recip_G @ inv_eps
+        # GG = np.outer(G, G_eps) for each G
+        GGs = np.einsum('gi,gj->gij', recip_G, G_eps)
+        
+        # factor = 4 * PI / V * exp(-G^2/(4*eta^2)) / G^2
+        factors = (4.0 * np.pi / volume) * np.exp(-gnorms**2 / (4.0 * eta_val**2)) / gnorms**2
+        
+        # Sum over all G: factor * GG
+        GG_total = np.einsum('g,gij->ij', factors, GGs)
+        
+        # Add contribution to all pairs (Gamma point phase is 1)
+        # ifcs[i, :, j, :] += zeff[i].T @ GG_total @ zeff[j]
+        # einsum: 'imk, kp, jpr -> imjr'
+        blocks = np.einsum('imk, kp, jpr -> imjr', zeff.transpose(0, 2, 1), GG_total, zeff)
+        ifcs += blocks
     
     return ifcs
 
@@ -279,9 +288,9 @@ def ewald_dipole_dipole_for_rpoint(
     epsilon_inf
         High-frequency dielectric tensor, shape (3, 3).
     zeff1
-        Born effective charges for cell 1, shape (3, 3, natom1).
+        Born effective charges for cell 1, shape (natom1, 3, 3).
     zeff2
-        Born effective charges for cell 2, shape (3, 3, natom2).
+        Born effective charges for cell 2, shape (natom2, 3, 3).
     lattice_vectors
         Supercell lattice vectors in Bohr, shape (3, 3).
     volume
@@ -292,7 +301,7 @@ def ewald_dipole_dipole_for_rpoint(
     Returns
     -------
     np.ndarray
-        Dipole-dipole IFCs, shape (3, natom1, 3, natom2).
+        Dipole-dipole IFCs, shape (natom1, 3, natom2, 3).
     """
     positions1_cart = np.asarray(positions1_cart, dtype=float)
     positions2_cart = np.asarray(positions2_cart, dtype=float)
@@ -302,7 +311,7 @@ def ewald_dipole_dipole_for_rpoint(
     
     natom1 = positions1_cart.shape[0]
     natom2 = positions2_cart.shape[0]
-    dyddt = np.zeros((3, natom1, 3, natom2), dtype=float)
+    dyddt = np.zeros((natom1, 3, natom2, 3), dtype=float)
     
     same_cell = np.allclose(positions1_cart, positions2_cart)
     
@@ -329,82 +338,83 @@ def ewald_dipole_dipole_for_rpoint(
     except ImportError:
         erfc = _erfc_approx
     
-    # Real-space contribution: only the specific R-point
-    for i in range(natom1):
-        for j in range(natom2):
-            rij = positions2_cart[j] - positions1_cart[i]
-            rr = reta * rij  # reta = sqrt(eta)
-            xx = inv_eps @ rr
-            
-            y2 = np.dot(rr, xx)
-            
-            if same_cell and i == j:
-                for mu in range(3):
-                    for nu in range(3):
-                        dyddt[mu, i, nu, j] += fac * reta3 * inv_eps[nu, mu] * inv_det_eps
-                continue
-            
-            if y2 < 1e-24:
-                continue
-            
-            yy = np.sqrt(y2)
-            invy = 1.0 / yy
-            invy2 = invy * invy
-            derfc_yy = erfc(yy)
-            
-            term2 = derfc_yy * invy * invy2
-            term3 = fact2 * np.exp(-y2) * invy2
-            term4 = -(term2 + term3)
-            term5 = (3.0 * term2 + term3 * (3.0 + 2.0 * y2)) * invy2
-            
-            for mu in range(3):
-                for nu in range(3):
-                    dyddt[mu, i, nu, j] += xx[nu] * xx[mu] * term5 + term4 * inv_eps[nu, mu]
+    # Real-space contribution: direct displacement only (R_latt=0)
+    rij_all = positions2_cart[None, :, :] - positions1_cart[:, None, :]
+    rr_all = reta * rij_all
+    xx_all = rr_all @ inv_eps.T
+
+    y2_all = np.einsum('ijk,ijk->ij', rr_all, xx_all)
+
+    if same_cell:
+        diag_val = fac * reta3 * inv_eps.T * inv_det_eps
+        for i in range(natom1):
+            dyddt[i, :, i, :] += diag_val
+
+    mask = y2_all >= 1e-24
+    if same_cell:
+        np.fill_diagonal(mask, False)
+
+    if np.any(mask):
+        y2 = y2_all[mask]
+        xx = xx_all[mask]
+        yy = np.sqrt(y2)
+        invy = 1.0 / yy
+        invy2 = invy * invy
+        erfc_y = erfc(yy)
+
+        term2 = erfc_y * invy * invy2
+        term3 = fact2 * np.exp(-y2) * invy2
+        term4 = -(term2 + term3)
+        term5 = (3.0 * term2 + term3 * (3.0 + 2.0 * y2)) * invy2
+
+        updates = term5[:, None, None] * np.einsum('mi,mj->mij', xx, xx) + term4[:, None, None] * inv_eps.T[None, :, :]
+
+        idx_i, idx_j = np.where(mask)
+        dyddt[idx_i, :, idx_j, :] += updates
     
     # Reciprocal-space contribution (ABINIT style)
-    # gsq = G.T @ epsilon @ G (NOT inv_eps!)
     rec_lattice = 2 * np.pi * np.linalg.inv(lattice_vectors).T
     
-    for ig1 in range(-10, 11):
-        for ig2 in range(-10, 11):
-            for ig3 in range(-10, 11):
-                G = ig1 * rec_lattice[0] + ig2 * rec_lattice[1] + ig3 * rec_lattice[2]
-                
-                # gsq = G.T @ epsilon @ G (ABINIT formula)
-                gsq = G @ epsilon_inf @ G
-                
-                if gsq < 1e-10:
-                    continue
-                
-                # arg1 = (2*pi)^2 * gsq / (4*eta)
-                arg1 = (2.0 * np.pi)**2 * gsq / (4.0 * eta_val)
-                
-                # Skip if exp(-arg1) is too small
-                if arg1 > 20:
-                    continue
-                
-                factor = np.exp(-arg1) / gsq
-                
-                for i in range(natom1):
-                    for j in range(natom2):
-                        G_rij = np.dot(G, positions2_cart[j] - positions1_cart[i])
-                        phase = np.cos(G_rij)
-                        
-                        for mu in range(3):
-                            for nu in range(3):
-                                dyddt[mu, i, nu, j] += factor * phase * G[mu] * G[nu]
+    # Generate G-points grid
+    lim = 5
+    g1, g2, g3 = np.meshgrid(np.arange(-lim, lim+1), np.arange(-lim, lim+1), np.arange(-lim, lim+1), indexing='ij')
+    g_indices = np.stack([g1.flatten(), g2.flatten(), g3.flatten()], axis=1)
+    
+    # G = g1*b1 + g2*b2 + g3*b3
+    Gs = g_indices @ rec_lattice
+    
+    # gsq = G.T @ epsilon @ G
+    gsq = np.einsum('gi,ij,gj->g', Gs, epsilon_inf, Gs)
+    
+    mask = (gsq > 1e-10)
+    # arg1 = (2*pi)^2 * gsq / (4*eta)
+    arg1 = (2.0 * np.pi)**2 * gsq / (4.0 * eta_val)
+    mask &= (arg1 <= 20)
+    
+    if np.any(mask):
+        Gs = Gs[mask]
+        gsq = gsq[mask]
+        arg1 = arg1[mask]
+        
+        factors = np.exp(-arg1) / gsq
+        
+        # rij = positions2[j] - positions1[i]
+        rij = positions2_cart[:, None, :] - positions1_cart[None, :, :] # (natom2, natom1, 3) 
+        # Note the swap for Broadcasting: G_rij needs to be (natom1, natom2, nG)
+        # G_rij = G . rij
+        G_rij = np.einsum('gi, kji -> kjg', Gs, rij.transpose(1, 0, 2)) # (natom1, natom2, nG)
+        phases = np.cos(G_rij) # (natom1, natom2, nG)
+        
+        # dyddt[i, mu, j, nu] += factor * phase * G[mu] * G[nu]
+        # Vectorized over G: sum_G factors[G] * phases[i,j,G] * G[mu]*G[nu]
+        GGs = np.einsum('gi,gj->gij', Gs, Gs)
+        dyddt += np.einsum('g, ijg, gmn -> ijmn', factors, phases, GGs)
     
     fact1 = 4.0 * np.pi / volume
     dyddt *= fact1
     
-    ifcs = np.zeros((3, natom1, 3, natom2), dtype=float)
-    for i in range(natom1):
-        for j in range(natom2):
-            for mu in range(3):
-                for nu in range(3):
-                    for ii in range(3):
-                        for jj in range(3):
-                            ifcs[mu, i, nu, j] += zeff1[ii, mu, i] * zeff2[jj, nu, j] * dyddt[ii, i, jj, j]
+    # ifcs[i, mu, j, nu] = sum_{alpha, beta} zeff1[i, alpha, mu] * dyddt[i, alpha, j, beta] * zeff2[j, beta, nu]
+    ifcs = np.einsum('iam,iajb,jbn->imjn', zeff1, dyddt, zeff2)
     
     return ifcs
 
@@ -436,9 +446,9 @@ def ewald_dipole_dipole_two_cells(
     epsilon_inf
         High-frequency dielectric tensor, shape (3, 3).
     zeff1
-        Born effective charges for cell 1, shape (3, 3, natom1).
+        Born effective charges for cell 1, shape (natom1, 3, 3).
     zeff2
-        Born effective charges for cell 2, shape (3, 3, natom2).
+        Born effective charges for cell 2, shape (natom2, 3, 3).
     lattice_vectors
         Supercell lattice vectors in Bohr, shape (3, 3).
     volume
@@ -453,7 +463,7 @@ def ewald_dipole_dipole_two_cells(
     Returns
     -------
     np.ndarray
-        Dipole-dipole IFCs, shape (3, natom1, 3, natom2).
+        Dipole-dipole IFCs, shape (natom1, 3, natom2, 3).
     """
     positions1_cart = np.asarray(positions1_cart, dtype=float)
     positions2_cart = np.asarray(positions2_cart, dtype=float)
@@ -463,7 +473,7 @@ def ewald_dipole_dipole_two_cells(
     
     natom1 = positions1_cart.shape[0]
     natom2 = positions2_cart.shape[0]
-    ifcs = np.zeros((3, natom1, 3, natom2), dtype=float)
+    ifcs = np.zeros((natom1, 3, natom2, 3), dtype=float)
     
     if eta is None:
         eta_val = 1.0 / np.power(volume, 1.0/3.0) * 2.0
@@ -502,8 +512,8 @@ def ewald_dipole_dipole_two_cells(
                 
                 dd_tensor = factor * (3.0 * np.outer(rhat, rhat) - np.eye(3))
                 
-                block = zeff1[:, :, i].T @ dd_tensor @ zeff2[:, :, j]
-                ifcs[:, i, :, j] += block
+                block = zeff1[i, :, :].T @ dd_tensor @ zeff2[j, :, :]
+                ifcs[i, :, j, :] += block
     
     for G in recip_G:
         Gnorm = np.linalg.norm(G)
@@ -517,8 +527,8 @@ def ewald_dipole_dipole_two_cells(
         
         for i in range(natom1):
             for j in range(natom2):
-                block = factor * zeff1[:, :, i].T @ GG @ zeff2[:, :, j]
-                ifcs[:, i, :, j] += block
+                block = factor * zeff1[i, :, :].T @ GG @ zeff2[j, :, :]
+                ifcs[i, :, j, :] += block
     
     return ifcs
 
@@ -540,7 +550,7 @@ def build_dipole_dipole_ifcs(
     epsilon_inf
         Dielectric tensor, shape (3, 3).
     zeff
-        Born effective charges, shape (3, 3, natom).
+        Born effective charges, shape (natom, 3, 3).
     lattice_vectors
         Lattice vectors in Bohr, shape (3, 3). Required for Ewald.
     use_ewald
@@ -550,7 +560,7 @@ def build_dipole_dipole_ifcs(
     Returns
     -------
     np.ndarray
-        Dipole-dipole IFCs, shape (3, natom, 3, natom).
+        Dipole-dipole IFCs, shape (natom, 3, natom, 3).
     
     Notes
     -----
@@ -566,3 +576,157 @@ def build_dipole_dipole_ifcs(
         return build_dipole_dipole_ifcs_simple(
             positions_cart, epsilon_inf, zeff
         )
+def compute_dipdip_dynmat(
+    q: np.ndarray,
+    unitcell: UnitcellData,
+    eta: Optional[float] = None,
+    nreal: int = 5,
+    nrecip: int = 8,
+    sumg0: int = 1,
+) -> np.ndarray:
+    """
+    Compute dipole-dipole dynamical matrix at q using Ewald summation (Convention 1).
+    
+    This matches ABINIT's ewald9/dipdip interaction for Fourier interpolation.
+    
+    Args:
+        q: q-point in reduced coordinates (3,)
+        unitcell: UnitcellData
+        eta: Ewald screening parameter
+        nreal: real-space shells
+        nrecip: reciprocal-space shells
+        sumg0: if 0, skip G=0 term (for q=0 non-analytic subtraction)
+    """
+    natom = unitcell.natom
+    rprimd = unitcell.rprimd
+    xcart = unitcell.xcart
+    zeff = unitcell.zeff
+    epsilon_inf = unitcell.epsilon_inf
+
+    if eta is None:
+        rmet = rprimd @ rprimd.T
+        gmet_cell = np.linalg.inv(rprimd) @ np.linalg.inv(rprimd).T
+        direct = np.sum(rmet)
+        recip = np.sum(gmet_cell)
+        eta_val = np.pi * 100.0 / 33.0 * np.sqrt(1.69 * recip / direct)
+    else:
+        eta_val = eta
+
+    vol = np.abs(np.linalg.det(rprimd))
+    
+    # Reciprocal lattice
+    rec_lattice = 2 * np.pi * np.linalg.inv(rprimd).T
+    q_cart = q @ rec_lattice
+    
+    dm_dip = np.zeros((natom, 3, natom, 3), dtype=complex)
+    
+    # 1. Reciprocal Part
+    lim = nrecip
+    g1, g2, g3 = np.meshgrid(np.arange(-lim, lim+1), np.arange(-lim, lim+1), np.arange(-lim, lim+1), indexing='ij')
+    g_indices = np.stack([g1.flatten(), g2.flatten(), g3.flatten()], axis=1)
+    
+    # K = G + q
+    Ks_red = g_indices + q
+    Ks_cart = Ks_red @ rec_lattice
+    
+    # k_eps_k = K . epsilon . K
+    k_eps_k = np.einsum('gi,ij,gj->g', Ks_cart, epsilon_inf, Ks_cart)
+    
+    mask = k_eps_k > 1e-12
+    if sumg0 == 0:
+        # Skip the term where G+q is zero (only happens at q=0, G=0)
+        # But we skip it explicitly if sumg0=0 is requested.
+        # Find which index in g_indices corresponds to G=(0,0,0)
+        g0_idx = np.where(np.all(g_indices == 0, axis=1))[0]
+        if len(g0_idx) > 0:
+            mask[g0_idx[0]] = False
+
+    Ks = Ks_cart[mask]
+    k_eps = k_eps_k[mask]
+    G_m = g_indices[mask]
+    
+    # Reciprocal sum scaling (ABINIT ewald9 style)
+    # factor = 4pi / (vol * sqrt(det_eps))
+    det_eps = np.linalg.det(epsilon_inf)
+    factor_rec_pre = (4.0 * np.pi / vol)
+    factor_rec = factor_rec_pre * np.exp(-k_eps / (4.0 * eta_val**2)) / k_eps
+    
+    # diff_tau[ia, ib] = tau_ib - tau_ia
+    diff_tau = xcart[np.newaxis, :, :] - xcart[:, np.newaxis, :]
+    
+    # Convention 1: Reciprocal phases involve full K = G + q
+    # PRB 55, 10355 (1997) Eq. (75): exp(i (q+G) . (tau_b - tau_a))
+    phases_rec = np.exp(1j * np.einsum('gi,abi->gab', Ks, diff_tau))
+    
+    KKs = np.einsum('gi,gj->gij', Ks, Ks)
+    T_rec = np.einsum('g,gab,gij->aibj', factor_rec, phases_rec, KKs)
+    dm_dip += np.einsum('iam,iajb,jbn->imjn', zeff, T_rec, zeff)
+    
+    # 2. Real-space part
+    reta = eta_val
+    lim_real = nreal
+    r1, r2, r3 = np.meshgrid(np.arange(-lim_real, lim_real+1), np.arange(-lim_real, lim_real+1), np.arange(-lim_real, lim_real+1), indexing='ij')
+    R_indices = np.stack([r1.flatten(), r2.flatten(), r3.flatten()], axis=1)
+    
+    try:
+        from scipy.special import erfc
+    except ImportError:
+        erfc = _erfc_approx
+
+    inv_eps = np.linalg.inv(epsilon_inf)
+    det_eps = np.linalg.det(epsilon_inf)
+    inv_det_eps = 1.0 / np.sqrt(det_eps)
+    
+    # Self-interaction is independent of q
+    diag_val = (4.0 / 3.0 / np.pi**0.5) * (reta**3) * inv_det_eps * inv_eps.T
+
+    for R_idx in R_indices:
+        R_cart = R_idx @ rprimd
+        
+        # Convention 1: phase = exp(i 2pi q . R)  (pure lattice)
+        # Sign matches ABINIT ewald9 Line 1036 and Gonze Eq (74).
+        phase = np.exp(2j * np.pi * np.dot(q, R_idx))
+        
+        # distance vector r = R + tau_b - tau_a
+        rij = R_cart[None, None, :] + diff_tau
+        
+        if np.all(R_idx == 0):
+            for i in range(natom):
+                dm_dip[i, :, i, :] -= np.einsum('mi,mn,np->ip', zeff[i], diag_val, zeff[i])
+            
+            mask = np.ones((natom, natom), dtype=bool)
+            np.fill_diagonal(mask, False)
+        else:
+            mask = np.ones((natom, natom), dtype=bool)
+            
+        if np.any(mask):
+            r_m = rij[mask]
+            r_eps_r = np.einsum('mi,ij,mj->m', r_m, inv_eps, r_m)
+            r_norm_eps = np.sqrt(r_eps_r)
+            y = reta * r_norm_eps
+            
+            invy = 1.0 / y
+            erfc_y = erfc(y)
+            exp_y2 = np.exp(-y**2)
+            fact_pi = 2.0 / np.sqrt(np.pi)
+            
+            term2 = erfc_y * invy**3
+            term3 = fact_pi * exp_y2 * invy**2
+            term4 = -(term2 + term3)
+            term5 = (3.0 * term2 + term3 * (3.0 + 2.0 * y**2))
+            
+            scaled_r = r_m @ inv_eps.T
+            dyddt_m = (term5[:, None, None] * np.einsum('mi,mj->mij', scaled_r, scaled_r) / (r_eps_r[:, None, None] + 1e-18) 
+                       + term4[:, None, None] * inv_eps.T[None, :, :])
+            dyddt_m *= (reta**3) * inv_det_eps
+            
+            idx_i, idx_j = np.where(mask)
+            for m in range(len(idx_i)):
+                ia, ib = idx_i[m], idx_j[m]
+                # Each real space shell R has phases exp(i q . R)
+                # But rij includes tau_b - tau_a. 
+                # Abinit convention 1: exp(i q . R)
+                block = zeff[ia].T @ dyddt_m[m] @ zeff[ib]
+                dm_dip[ia, :, ib, :] += phase * block
+                
+    return dm_dip
