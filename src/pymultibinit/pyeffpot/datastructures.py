@@ -28,9 +28,10 @@ class IFCData:
     """Interatomic force constants data."""
     nrpt: int                        # Number of range points
     cell: np.ndarray                 # (3, nrpt) cell indices for each range point
-    atmfrc: np.ndarray               # (3, natom, 3, natom, nrpt) total IFCs
-    short_atmfrc: np.ndarray         # (3, natom, 3, natom, nrpt) short-range IFCs
-    ewald_atmfrc: Optional[np.ndarray] = None  # (3, natom, 3, natom, nrpt) Ewald IFCs
+    atmfrc: np.ndarray               # (natom, 3, natom, 3, nrpt) total IFCs
+    short_atmfrc: np.ndarray         # (natom, 3, natom, 3, nrpt) short-range IFCs
+    ewald_atmfrc: Optional[np.ndarray] = None  # (natom, 3, natom, 3, nrpt) Ewald IFCs
+    wghatm: Optional[np.ndarray] = None        # (natom, natom, nrpt) Wigner-Seitz weights
 
 
 @dataclass  
@@ -44,12 +45,26 @@ class UnitcellData:
     
     # Dielectric and Born charges
     epsilon_inf: Optional[np.ndarray] = None  # (3, 3) dielectric tensor
-    zeff: Optional[np.ndarray] = None         # (3, 3, natom) Born effective charges
+    zeff: Optional[np.ndarray] = None         # (natom, 3, 3) Born effective charges
     
     # Elastic constants
     elastic_constants: Optional[np.ndarray] = None  # (6, 6) elastic tensor
     
-    # Strain-phonon coupling (optional)
+    # Strain-phonon coupling (3rd order: ∂³E/∂u∂u∂η)
+    # List of 6 IFCData objects, one for each strain direction
+    phonon_strain: Optional[List[IFCData]] = None
+    
+    # Elastic-displacement coupling (3rd order: ∂³E/∂η∂η∂u)
+    elastic_displacement: Optional[np.ndarray] = None  # (6, 6, 3, natom)
+    
+    # Higher order elastic (3rd and 4th)
+    elastic3rd: Optional[np.ndarray] = None  # (6, 6, 6)
+    elastic4th: Optional[np.ndarray] = None  # (6, 6, 6, 6)
+    
+    # Strain-displacement coupling (3rd order: ∂³E/∂η∂u∂u)
+    # (Same as phonon_strain)
+    
+    # Internal strain coupling (2nd order: ∂²E/∂η∂u)
     strain_coupling: Optional[np.ndarray] = None  # (6, 3, natom) if present
 
     # Optional DDB-specific metadata
@@ -61,6 +76,7 @@ class UnitcellData:
     symrel: Optional[np.ndarray] = None           # (nsym, 3, 3) symmetry operations (integer)
     nqshft: int = 1                               # Number of q-grid shifts
     q1shft: Optional[np.ndarray] = None           # (nqshft, 3) q-grid shifts
+    atom_mapping: Optional[np.ndarray] = None      # (natom, nsym, 4) if computed
     
     @property
     def natom(self) -> int:
@@ -112,6 +128,9 @@ class SupercellPotential:
     
     # IFCs in supercell (including dipole-dipole)
     ifcs_sc: IFCData                 # Supercell IFCs
+    
+    # Strain-phonon coupling in supercell (List of 6 IFCData)
+    phonon_strain_sc: Optional[List[IFCData]] = None
     
     # Anharmonic coefficients (from XML, in unitcell basis)
     # These will be applied during evaluation
