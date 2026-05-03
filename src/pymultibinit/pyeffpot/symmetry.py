@@ -13,12 +13,14 @@ References:
 """
 
 from typing import Tuple, Optional
+import importlib
 import numpy as np
 
 try:
-    import spglib
+    spglib = importlib.import_module("spglib")
     HAS_SPGLIB = True
 except ImportError:
+    spglib = None
     HAS_SPGLIB = False
 
 
@@ -57,6 +59,8 @@ def get_symmetry_from_crystal(
     - tnons: Non-symmorphic translations (fractional)
     """
     if not HAS_SPGLIB:
+        raise ImportError("spglib is required for symmetry analysis. Install with: pip install spglib")
+    if spglib is None:
         raise ImportError("spglib is required for symmetry analysis. Install with: pip install spglib")
     
     cell = (lattice, positions, numbers)
@@ -213,7 +217,7 @@ def build_atom_mapping(
     symrec = get_reciprocal_symmetry(rotations)
     
     for isym in range(nsym):
-        S_inv = symrec[isym]  # Inverse rotation (symrec in ABINIT)
+        S_inv = symrec[isym].T  # ABINIT symatm applies transpose(symrec)
         tau = translations[isym]  # Fractional translation (tnons)
         
         for iat in range(natom):
@@ -348,17 +352,16 @@ def rotate_dynamical_matrix_full(
         if time_reversal:
             q_target = -q_target
     
-    # Compute phase factors for each atom
-    # In ABINIT, D_ij(q_target) = phase_ia * conj(phase_jb) * D_src
-    # where phase_ia = exp(i 2pi q_target . trans_ia)
+    # Compute phase factors for each atom.
+    # ABINIT symdm9 uses the source DDB q-vector qq in these phases, not the
+    # target q-point after applying the reciprocal-space symmetry. With time
+    # reversal, qq is negated before both conjugating the matrix and evaluating
+    # the atom-translation phases.
+    q_phase = -q_ibz if time_reversal else q_ibz
     phases = np.zeros(natom, dtype=complex)
     for ia in range(natom):
-        # The translation trans_ia from build_atom_mapping is defined such that:
-        # x_iat = S(x_jat) + t_ia (mod lattice)
-        # However, the standard phase convention follows the inverse mapping.
-        # We follow the convention: phase_ia = exp(i 2pi q_target . t_ia)
         trans = indsym_i[0:3, ia]
-        arg = 2 * np.pi * np.dot(q_target, trans)
+        arg = 2 * np.pi * np.dot(q_phase, trans)
         phases[ia] = np.exp(1j * arg)
     
     # Rotate dynamical matrix
