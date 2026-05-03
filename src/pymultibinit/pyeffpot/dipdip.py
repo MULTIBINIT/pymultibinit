@@ -503,7 +503,7 @@ def ewald_dipole_dipole_two_cells(
                     continue
                 
                 rhat = rij / rnorm
-                erfc_eta_r = erfc(eta_val * rnorm)
+                erfc_eta_r = erfc(float(eta_val * rnorm))
                 exp_eta_r2 = np.exp(-(eta_val * rnorm)**2)
                 
                 factor1 = erfc_eta_r / rnorm**3
@@ -603,6 +603,9 @@ def compute_dipdip_dynmat(
     zeff = unitcell.zeff
     epsilon_inf = unitcell.epsilon_inf
 
+    if zeff is None or epsilon_inf is None:
+        return np.zeros((natom, 3, natom, 3), dtype=complex)
+
     if eta is None:
         rmet = rprimd @ rprimd.T
         gmet_cell = np.linalg.inv(rprimd) @ np.linalg.inv(rprimd).T
@@ -633,10 +636,7 @@ def compute_dipdip_dynmat(
     k_eps_k = np.einsum('gi,ij,gj->g', Ks_cart, epsilon_inf, Ks_cart)
     
     mask = k_eps_k > 1e-12
-    if sumg0 == 0:
-        # Skip the term where G+q is zero (only happens at q=0, G=0)
-        # But we skip it explicitly if sumg0=0 is requested.
-        # Find which index in g_indices corresponds to G=(0,0,0)
+    if sumg0 == 0 and np.linalg.norm(q) < 1e-12:
         g0_idx = np.where(np.all(g_indices == 0, axis=1))[0]
         if len(g0_idx) > 0:
             mask[g0_idx[0]] = False
@@ -649,13 +649,10 @@ def compute_dipdip_dynmat(
     # factor = 4pi / (vol * sqrt(det_eps))
     det_eps = np.linalg.det(epsilon_inf)
     factor_rec_pre = (4.0 * np.pi / vol)
-    factor_rec = factor_rec_pre * np.exp(-k_eps / (4.0 * eta_val**2)) / k_eps
+    factor_rec = factor_rec_pre * np.exp(-k_eps / (4.0 * eta_val)) / k_eps
     
-    # diff_tau[ia, ib] = tau_ib - tau_ia
-    diff_tau = xcart[np.newaxis, :, :] - xcart[:, np.newaxis, :]
+    diff_tau = xcart[:, np.newaxis, :] - xcart[np.newaxis, :, :]
     
-    # Convention 1: Reciprocal phases involve full K = G + q
-    # PRB 55, 10355 (1997) Eq. (75): exp(i (q+G) . (tau_b - tau_a))
     phases_rec = np.exp(1j * np.einsum('gi,abi->gab', Ks, diff_tau))
     
     KKs = np.einsum('gi,gj->gij', Ks, Ks)
@@ -663,7 +660,7 @@ def compute_dipdip_dynmat(
     dm_dip += np.einsum('iam,iajb,jbn->imjn', zeff, T_rec, zeff)
     
     # 2. Real-space part
-    reta = eta_val
+    reta = np.sqrt(eta_val)
     lim_real = nreal
     r1, r2, r3 = np.meshgrid(np.arange(-lim_real, lim_real+1), np.arange(-lim_real, lim_real+1), np.arange(-lim_real, lim_real+1), indexing='ij')
     R_indices = np.stack([r1.flatten(), r2.flatten(), r3.flatten()], axis=1)
@@ -683,11 +680,8 @@ def compute_dipdip_dynmat(
     for R_idx in R_indices:
         R_cart = R_idx @ rprimd
         
-        # Convention 1: phase = exp(i 2pi q . R)  (pure lattice)
-        # Sign matches ABINIT ewald9 Line 1036 and Gonze Eq (74).
-        phase = np.exp(2j * np.pi * np.dot(q, R_idx))
+        phase = np.exp(-2j * np.pi * np.dot(q, R_idx))
         
-        # distance vector r = R + tau_b - tau_a
         rij = R_cart[None, None, :] + diff_tau
         
         if np.all(R_idx == 0):
@@ -718,7 +712,7 @@ def compute_dipdip_dynmat(
             scaled_r = r_m @ inv_eps.T
             dyddt_m = (term5[:, None, None] * np.einsum('mi,mj->mij', scaled_r, scaled_r) / (r_eps_r[:, None, None] + 1e-18) 
                        + term4[:, None, None] * inv_eps.T[None, :, :])
-            dyddt_m *= (reta**3) * inv_det_eps
+            dyddt_m *= -(reta**3) * inv_det_eps
             
             idx_i, idx_j = np.where(mask)
             for m in range(len(idx_i)):
