@@ -263,12 +263,17 @@ def _apply_phase_shift(
     dynmat: np.ndarray,
     qpoints: np.ndarray,
     gprim: np.ndarray,
-    trans: np.ndarray
+    trans: np.ndarray,
+    option: int = 1,
 ) -> np.ndarray:
     """
     Apply phase shift to dynamical matrices.
     
-    D'(q, a, b) = D(q, a, b) * exp(i*2*pi*q*(tau_a - tau_b))
+    ABINIT dymfz9 phase shift between usual and canonical atomic coordinates.
+
+    option=1 transforms usual coordinates to normalized canonical coordinates
+    before q->R Fourier transform and uses a negative phase. option=2 restores
+    usual coordinates after R->q Fourier transform and uses a positive phase.
     
     Parameters
     ----------
@@ -280,6 +285,8 @@ def _apply_phase_shift(
         Reciprocal lattice vectors
     trans : (natom, 3) array
         Translation vectors from canonical transformation
+    option : int
+        ABINIT dymfz9 option: 1 for q->R preparation, 2 for R->q restoration.
         
     Returns
     -------
@@ -292,10 +299,15 @@ def _apply_phase_shift(
     # diff_trans[a, b, 3] = trans[a] - trans[b]
     diff_trans = trans[:, np.newaxis, :] - trans[np.newaxis, :, :]  # (natom, natom, 3)
 
+    if option not in (1, 2):
+        raise ValueError("option must be 1 or 2")
+
     # phase_arg[q, a, b] = kk[q] . diff_trans[a, b]
     # Here kk is 2pi*q_cart, and diff_trans is R_cart. 
     # So phase_arg is already the full phase (dimensionless, 2pi-scaled).
     phase_arg = np.einsum('qi,abi->qab', kk, diff_trans)  # (nqpt, natom, natom)
+    if option == 1:
+        phase_arg = -phase_arg
 
     phase_re = np.cos(phase_arg)  # (nqpt, natom, natom)
     phase_im = np.sin(phase_arg)
@@ -689,8 +701,8 @@ def _build_supercell_ifcs_fourier(
             from .dipdip import compute_dipdip_dynmat
             for iq in range(nqbz):
                 ewald_q = compute_dipdip_dynmat(qbz[iq], unitcell, sumg0=0)
-                dynmat_bz[iq, ..., 0] -= ewald_q.real
-                dynmat_bz[iq, ..., 1] -= ewald_q.imag
+                dynmat_bz[iq, ..., 0] -= np.real(ewald_q)
+                dynmat_bz[iq, ..., 1] -= np.imag(ewald_q)
 
     # Step 5: Canonical coordinate transform + phase shift
     rcan, trans = _canonical_coordinates(unitcell.xred, unitcell.rprimd)
@@ -1056,5 +1068,3 @@ def set_anharmonic_coeffs(supercell: SupercellPotential, coeffs: List):
     Set anharmonic coefficients for supercell.
     """
     supercell.anharmonic_coeffs = coeffs
-
-
