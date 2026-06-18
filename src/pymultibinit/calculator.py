@@ -19,20 +19,37 @@ class MultibinitCalculator(Calculator):
     
     Properties implemented: energy, forces, stress
     
+    Two backends are available:
+        - 'cffi'   : Requires libabinit.so/dylib (Fortran). Use from_abi(),
+                     from_params(), or from_config_file().
+        - 'pyeffpot': Pure Python, no Fortran dependency. Use from_pyeffpot().
+                       Reads a DDB file, an optional XML coefficient file, and
+                       activates dipole-dipole / supercell via keyword args.
+
     Example:
         >>> from ase import Atoms
         >>> from pymultibinit import MultibinitCalculator
-        >>> 
+        >>>
+        >>> # --- CFFI (Fortran) backend ---
         >>> # Using .abi file
         >>> calc = MultibinitCalculator.from_abi("input.abi")
         >>> atoms.calc = calc
         >>> energy = atoms.get_potential_energy()
-        >>> 
+        >>>
         >>> # Using parameters
         >>> calc = MultibinitCalculator.from_params(
         ...     ddb_file="system_DDB",
         ...     sys_file="system.xml",
         ...     ncell=(2, 2, 2)
+        ... )
+        >>> atoms.calc = calc
+        >>>
+        >>> # --- Pure Python (pyeffpot) backend, no Fortran needed ---
+        >>> calc = MultibinitCalculator.from_pyeffpot(
+        ...     ddb_file="system.DDB",
+        ...     xml_file="coeffs.xml",   # optional, None to skip
+        ...     ncell=(4, 4, 4),         # supercell size
+        ...     dipdip=True,             # dipole-dipole (long-range Coulomb)
         ... )
         >>> atoms.calc = calc
     """
@@ -101,6 +118,73 @@ class MultibinitCalculator(Calculator):
             ngqpt=ngqpt,
             dipdip=dipdip,
             lib_path=lib_path
+        )
+        return cls(potential=potential, **kwargs)
+    
+    @classmethod
+    def from_pyeffpot(cls, ddb_file: str, xml_file: Optional[str] = None,
+                      ncell: Tuple[int, int, int] = (4, 4, 4),
+                      dipdip: bool = True,
+                      asr: bool = True,
+                      auto_match_atoms: bool = True,
+                      match_tolerance: float = 0.1,
+                      reference_stress_ha_bohr3: Optional[np.ndarray] = None,
+                      **kwargs) -> 'MultibinitCalculator':
+        """
+        Create a calculator using the **pure Python** backend (no Fortran/libabinit required).
+
+        This is the recommended path when libabinit.so is not available.
+        It parses the DDB file directly in Python, optionally overlays anharmonic
+        coefficients from an XML file, builds the supercell, applies the
+        dipole-dipole long-range correction and the acoustic sum rule (ASR),
+        and returns a fully functional ASE calculator.
+
+        Args:
+            ddb_file: Path to the ABINIT DDB (derivative database) file.
+            xml_file: Path to an XML coefficient file with anharmonic terms.
+                Optional - pass None or omit to use the harmonic DDB-only model.
+            ncell: Supercell dimensions (nx, ny, nz). Defaults to (4, 4, 4).
+            dipdip: If True (default), activate dipole-dipole (long-range
+                Coulomb) correction using Born effective charges and the
+                dielectric tensor read from the DDB. Set False to disable.
+            asr: If True (default), enforce the acoustic sum rule on the
+                interatomic force constants.
+            auto_match_atoms: If True, automatically reorder input atoms to
+                match the MULTIBINIT reference on the first evaluate() call.
+            match_tolerance: Tolerance (Angstrom) for atom matching.
+            reference_stress_ha_bohr3: Optional (3,3) reference stress tensor
+                in Hartree/Bohr^3 to subtract (used for parity tests).
+            **kwargs: Additional arguments forwarded to the ASE Calculator base.
+
+        Returns:
+            Initialized MultibinitCalculator instance backed by pyeffpot.
+
+        Example:
+            >>> from ase import Atoms
+            >>> from pymultibinit import MultibinitCalculator
+            >>>
+            >>> # Pure-Python ASE calculator, no libabinit needed
+            >>> calc = MultibinitCalculator.from_pyeffpot(
+            ...     ddb_file="BTO.DDB",
+            ...     xml_file="model.xml",   # optional
+            ...     ncell=(2, 2, 2),
+            ...     dipdip=True,
+            ... )
+            >>> atoms = Atoms(...)
+            >>> atoms.calc = calc
+            >>> energy = atoms.get_potential_energy()   # eV
+            >>> forces = atoms.get_forces()             # eV/Angstrom
+            >>> stress = atoms.get_stress()             # eV/Angstrom^3
+        """
+        potential = MultibinitPotential.from_pyeffpot(
+            ddb_file=ddb_file,
+            xml_file=xml_file,
+            ncell=ncell,
+            dipdip=dipdip,
+            asr=asr,
+            auto_match_atoms=auto_match_atoms,
+            match_tolerance=match_tolerance,
+            reference_stress_ha_bohr3=reference_stress_ha_bohr3,
         )
         return cls(potential=potential, **kwargs)
     
