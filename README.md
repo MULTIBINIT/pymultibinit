@@ -39,12 +39,21 @@ from ase.optimize import BFGS
 # Load from config file (recommended)
 calc = MultibinitCalculator.from_config_file("multibinit.conf")
 
-# Or from parameters
+# Or from parameters (requires libabinit / Fortran)
 calc = MultibinitCalculator.from_params(
     ddb_file="system_DDB",
     sys_file="system.xml",
     ncell=(2, 2, 2),
     ngqpt=(4, 4, 4)
+)
+
+# Or pure Python (no libabinit required) - reads DDB directly,
+# optional XML coefficients, toggles dipole-dipole and supercell size.
+calc = MultibinitCalculator.from_pyeffpot(
+    ddb_file="system.DDB",
+    xml_file="coeffs.xml",   # optional, None to skip
+    ncell=(2, 2, 2),
+    dipdip=True,
 )
 
 # Build supercell (must match ncell!)
@@ -84,8 +93,13 @@ dipdip: 1
 
 ### `MultibinitCalculator` (ASE interface)
 
+Two backends are supported. The **CFFI backend** requires `libabinit.so`
+(Fortran); the **pyeffpot backend** is pure Python and needs only the DDB file.
+
 ```python
-# From config file (recommended)
+# --- CFFI backend (requires libabinit) ---
+
+# From config file (recommended when libabinit is available)
 calc = MultibinitCalculator.from_config_file("config.conf")
 
 # From parameters
@@ -99,6 +113,17 @@ calc = MultibinitCalculator.from_params(
 
 # From .abi file
 calc = MultibinitCalculator.from_abi("input.abi")
+
+# --- Pure Python backend (no libabinit required) ---
+
+# Reads DDB directly; XML coefficients are optional.
+calc = MultibinitCalculator.from_pyeffpot(
+    ddb_file="system.DDB",
+    xml_file="model.xml",   # optional, pass None or omit to skip
+    ncell=(2, 2, 2),        # supercell size
+    dipdip=True,            # long-range dipole-dipole correction
+    asr=True,               # acoustic sum rule
+)
 ```
 
 ### `MultibinitPotential` (Low-level interface)
