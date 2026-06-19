@@ -27,7 +27,7 @@ class TestPyeffpotBackend:
     
     @pytest.fixture
     def bto_ddb_path(self):
-        """Path to BaTiO3 DDB test file."""
+        """Path to BaHfO3 DDB test file."""
         return Path(__file__).parent.parent.parent / 'abinit/tests/v9/Input/BTO.DDB'
     
     def test_from_pyeffpot_creation(self, bto_ddb_path):

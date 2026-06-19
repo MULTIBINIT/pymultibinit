@@ -1,8 +1,8 @@
 #---------------------------------------------------------------
-# MULTIBINIT Input File for BaTiO3
+# MULTIBINIT Input File for BaHfO3
 #---------------------------------------------------------------
 # This is an example input file (.abi) for running MULTIBINIT
-# calculations on BaTiO3 using an effective Hamiltonian.
+# calculations on BaHfO3 using an effective Hamiltonian.
 #
 # This file contains parameters for:
 # - DDB file specification and Q-point grid
@@ -20,7 +20,7 @@
 ngqpt = 4 4 4
 
 # Recompute dipole-dipole interactions (1=yes, 0=no)
-# Important for polar materials like BaTiO3
+# Important for polar materials like BaHfO3
 dipdip = 1
 
 #---------------------------------------------------------------
@@ -30,7 +30,7 @@ dipdip = 1
 # This creates a ncell[0] x ncell[1] x ncell[2] supercell
 # from the primitive cell
 #
-# For BaTiO3 (5 atoms/cell): 2x2x2 = 8 cells = 40 atoms total
+# For BaHfO3 (5 atoms/cell): 2x2x2 = 8 cells = 40 atoms total
 ncell = 2 2 2
 
 #---------------------------------------------------------------
@@ -78,14 +78,14 @@ dtion = 50
 #
 # Python example:
 #   pot = MultibinitPotential.from_abi(
-#       abi_file="BaTiO3.abi",
+#       abi_file="BaHfO3.abi",
 #       lib_path="/path/to/libabinit.so"  # optional
 #   )
 #
 # Or use from_params() without .abi file:
 #   pot = MultibinitPotential.from_params(
-#       ddb_file="BaTiO3_DDB",
-#       sys_file="BaTiO3.xml",
+#       ddb_file="BaHfO3_DDB",
+#       sys_file="BaHfO3.xml",
 #       ncell=(2, 2, 2),
 #       ngqpt=(4, 4, 4),
 #       dipdip=1
