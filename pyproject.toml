@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Xu He", email = "x.he@uliege.be" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "ase>=3.26.0",
     "cffi>=2.0.0",
