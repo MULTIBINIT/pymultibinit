@@ -5,7 +5,7 @@ Covers ``MultibinitCalculator.from_pyeffpot`` which builds an ASE
 calculator from a DDB file (+ optional XML) without requiring
 libabinit. The tests exercise the ASE ``calculate`` interface
 (``get_potential_energy``, ``get_forces``, ``get_stress``) using the
-locally bundled BaTiO3 example fixture so they run in any environment.
+locally bundled BaHfO3 example fixture so they run in any environment.
 
 Run with:
     pytest pymultibinit/tests/test_calculator_pyeffpot.py -v
@@ -25,14 +25,14 @@ from pymultibinit import MultibinitCalculator
 from pymultibinit.potential import MultibinitPotential
 
 # Local fixture: always present in the repo, does not depend on external ABINIT test data
-BTO_DIR = Path(__file__).resolve().parents[1] / "examples" / "BaTiO3_example"
-BTO_DDB = BTO_DIR / "BaTiO3_DDB"
-BTO_XML = BTO_DIR / "BaTiO3.xml"
+BTO_DIR = Path(__file__).resolve().parents[1] / "examples" / "BaHfO3_example"
+BTO_DDB = BTO_DIR / "BaHfO3_DDB"
+BTO_XML = BTO_DIR / "BaHfO3.xml"
 
 _skip_no_ase = pytest.mark.skipif(not _HAS_ASE, reason="ASE not installed")
 _skip_no_fixture = pytest.mark.skipif(
     not BTO_DDB.exists(),
-    reason=f"BaTiO3 example DDB fixture missing: {BTO_DDB}",
+    reason=f"BaHfO3 example DDB fixture missing: {BTO_DDB}",
 )
 
 
@@ -116,7 +116,7 @@ class TestMultibinitCalculatorFromPyeffpot:
         assert np.max(np.abs(forces)) < 1e-6
 
     def test_energy_responds_to_displacement(self):
-        # NOTE: we deliberately do NOT assert the sign of ΔE here. The BaTiO3
+        # NOTE: we deliberately do NOT assert the sign of ΔE here. The BaHfO3
         # cubic reference is a saddle point along its ferroelectric soft mode,
         # so the energy can legitimately DECREASE along certain directions.
         calc = MultibinitCalculator.from_pyeffpot(

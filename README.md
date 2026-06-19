@@ -57,7 +57,7 @@ calc = MultibinitCalculator.from_pyeffpot(
 )
 
 # Build supercell (must match ncell!)
-unit_cell = Atoms('BaTiO3', 
+unit_cell = Atoms('BaHfO3', 
                  scaled_positions=[[0,0,0], [0.5,0.5,0.5], 
                                    [0.5,0,0.5], [0,0.5,0.5], [0.5,0.5,0]],
                  cell=[4.0, 4.0, 4.0], pbc=True)
@@ -88,6 +88,84 @@ ncell: 2 2 2
 ngqpt: 4 4 4
 dipdip: 1
 ```
+
+## Building Models With the MULTIBINIT Binary
+
+`pymultibinit` provides a thin model-building runner that calls the external
+`multibinit` executable. It does not use ABINIT library mode for training.
+
+```python
+from pymultibinit import train_multibinit_model
+
+result = train_multibinit_model(
+    ddb="system.ddb",
+    hist="training_HIST.nc",
+    config="train.abi",
+    output_dir="model_out",
+    executable="/path/to/multibinit",  # optional if MULTIBINIT_BINARY or PATH is set
+)
+
+print(result.model_config)
+print(result.metadata_file)
+```
+
+The same workflow is available from `mbtools`:
+
+```bash
+mbtools train system.ddb training_HIST.nc \
+  --config train.abi \
+  --output-dir model_out \
+  --executable /path/to/multibinit
+```
+
+The runner exposes resolved input paths to the binary through environment
+variables: `PYMULTIBINIT_DDB`, `PYMULTIBINIT_HIST`, `PYMULTIBINIT_CONFIG`, and
+`PYMULTIBINIT_OUTPUT_DIR`. It captures stdout/stderr logs and writes
+`pymultibinit_training_result.json` in the output directory.
+
+## Pure-Python Model Training
+
+`pymultibinit.training` also provides a pure-Python fitting path that reads DDB,
+HIST, and XML basis inputs, evaluates coefficient features, solves fitted
+values, and writes fitted coefficient XML without invoking `multibinit`.
+
+```bash
+mbtools train-python system.ddb training_HIST.nc \
+  --basis-xml candidate_basis.xml \
+  --output-xml fit_coeffs.xml \
+  --diagnostics-json fit_diagnostics.json \
+  --ncell 2 2 2 \
+  --selection greedy \
+  --ncoeff 20
+```
+
+For the detailed procedure, including dataset residuals, feature matrices,
+displacement-only term generation, symmetry orbit materialization, and greedy
+term selection, see `docs/PURE_PYTHON_TRAINING.md`.
+
+## Exporting DDB Files to Phonopy
+
+`pymultibinit` can export ABINIT text DDB harmonic data to a self-contained
+`phonopy_params.yaml` file without invoking ABINIT binaries. The embedded force
+constants use phonopy's default VASP-compatible unit convention, so a plain
+`phonopy.load("phonopy_params.yaml")` reports frequencies in THz.
+
+```python
+from pymultibinit import write_phonopy_from_ddb
+
+result = write_phonopy_from_ddb("system_DDB", "phonopy_from_ddb")
+print(result.phonopy_params_yaml)
+```
+
+The same workflow is available from `mbtools`:
+
+```bash
+mbtools ddb-to-phonopy system_DDB phonopy_from_ddb --verbose
+```
+
+The export writes only `phonopy_params.yaml`. The default supercell is the DDB
+`ngqpt` q-grid. If `--supercell NX NY NZ` is provided, it must match that
+q-grid.
 
 ## API Reference
 
@@ -214,6 +292,17 @@ Conversions are automatic.
 ```bash
 cd pymultibinit/examples
 python simple_example.py
+```
+
+BaHfO3 binary-training tutorial and example:
+
+- `docs/BAHFO3_TRAINING_TUTORIAL.md`
+- `examples/BaHfO3_training/01_train_bahfo3.py`
+
+Runnable dry run:
+
+```bash
+uv run python examples/BaHfO3_training/01_train_bahfo3.py --dry-run
 ```
 
 ## License

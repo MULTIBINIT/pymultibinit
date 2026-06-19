@@ -31,7 +31,7 @@ pot.evaluate(positions, lattice)
 
 # Export supercell
 atoms = pot.export_supercell_to_ase()
-atoms.set_chemical_symbols(['Ba']*8 + ['Ti']*8 + ['O']*24)  # Set correct symbols
+# Symbols auto-resolved from DDB metadata (typat -> znucl -> element)
 atoms.write('supercell.cif')
 ```
 
@@ -49,7 +49,7 @@ if structure is not None:
 **Returns:**
 - `positions`: numpy array shape (natom, 3) in current units
 - `lattice`: numpy array shape (3, 3) in current units
-- `atomic_numbers`: None (not available from C API)
+- `atomic_numbers`: numpy array shape (natom,) when DDB metadata is available, else `None`. Resolved from typat + znucl parsed by `pyeffpot.read_ddb()` at init time.
 
 ### 2. Export to ASE Atoms Object
 
@@ -59,7 +59,7 @@ atoms = pot.export_supercell_to_ase()
 
 **Returns:** ASE Atoms object with:
 - Positions and cell in Angstrom (ASE convention)
-- Chemical symbols set to 'X' (unknown)
+- Chemical symbols auto-resolved from DDB metadata (typat → znucl → element); fall back to `'X'` only when no DDB metadata is available
 - PBC enabled
 
 ### 3. Export to File
@@ -82,8 +82,8 @@ import numpy as np
 
 # Initialize
 pot = MultibinitPotential.from_params(
-    ddb_file="BaTiO3_DDB",
-    sys_file="BaTiO3.xml",
+    ddb_file="BaHfO3_DDB",
+    sys_file="BaHfO3.xml",
     ncell=(2, 2, 2)  # 2x2x2 supercell
 )
 
@@ -98,14 +98,13 @@ pot.evaluate(positions_dummy, lattice)
 # Now export
 atoms = pot.export_supercell_to_ase()
 
-# Set correct chemical symbols (BaTiO3 has 1 Ba, 1 Ti, 3 O per cell)
-# For 2x2x2 supercell: 8 Ba, 8 Ti, 24 O
-symbols = ['Ba'] * 8 + ['Ti'] * 8 + ['O'] * 24
-atoms.set_chemical_symbols(symbols)
+# Symbols are auto-resolved from the DDB metadata.
+# For a BaHfO3 2x2x2 supercell: 8 Ba, 8 Hf, 24 O
+print(atoms.get_chemical_symbols())  # ['Ba', 'Hf', 'O', 'O', 'O', ...]
 
 # Save to file
-atoms.write('BaTiO3_supercell.cif')
-print(f"Exported {len(atoms)} atoms to BaTiO3_supercell.cif")
+atoms.write('BaHfO3_supercell.cif')
+print(f"Exported {len(atoms)} atoms to BaHfO3_supercell.cif")
 ```
 
 ### Example 2: Export with Explicit Reference Setting
@@ -161,7 +160,7 @@ print(f"Supercell: {len(supercell)} atoms")
 # Should be primitive * 2*2*2 = 8x
 assert len(supercell) == len(primitive) * 8
 
-# Set symbols based on primitive
+# Set symbols based on primitive (only needed if no DDB metadata was loaded)
 primitive_symbols = primitive.get_chemical_symbols()
 supercell_symbols = primitive_symbols * 8
 supercell.set_chemical_symbols(supercell_symbols)
@@ -188,7 +187,8 @@ energy = atoms.get_potential_energy()
 
 # Export the internal supercell for visualization
 supercell = calc.potential.export_supercell_to_ase()
-supercell.set_chemical_symbols(atoms.get_chemical_symbols() * 8)  # Assuming 2x2x2
+# Symbols auto-resolve from DDB metadata; override only if needed for matching
+# supercell.set_chemical_symbols(atoms.get_chemical_symbols() * 8)
 supercell.write('supercell_reference.cif')
 
 # Continue with optimization
@@ -207,7 +207,8 @@ pot = MultibinitPotential.from_config_file('multibinit.conf')
 
 # Export to multiple formats
 atoms = pot.export_supercell_to_ase()
-atoms.set_chemical_symbols(['Sr']*8 + ['Ti']*8 + ['O']*24)
+# Symbols already resolved; you can override only if you want different labels:
+# atoms.set_chemical_symbols(['Sr']*8 + ['Ti']*8 + ['O']*24)
 
 # CIF for visualization (VESTA, etc.)
 atoms.write('supercell.cif')
@@ -247,7 +248,7 @@ pot.evaluate(input_atoms.get_positions(), input_atoms.get_cell())
 
 # Export reference structure to see internal ordering
 reference = pot.export_supercell_to_ase()
-reference.set_chemical_symbols(['Ba', 'Ti', 'O', 'O', 'O'] * 8)
+# Symbols auto-resolved from DDB; for BaHfO3 2x2x2: ['Ba','Hf','O','O','O'] * 8
 reference.write('reference_ordering.cif')
 
 # Check atom mapping
@@ -261,15 +262,20 @@ if mapping_info:
 
 ## Setting Chemical Symbols
 
-Since the C API doesn't provide atomic numbers, you need to set chemical symbols manually:
+Symbols are auto-resolved from DDB metadata at init time (`from_params`, `from_abi`, `from_pyeffpot`, `from_config_file` all load `znucl`/`typat` via `pyeffpot.read_ddb()`). You only need to set them manually when:
 
-### Method 1: Simple Pattern
+- You constructed the potential with `MultibinitPotential()` directly and never loaded a DDB
+- You want to override the auto-resolved symbols for visualization purposes
+- The DDB parser failed to load metadata (a `RuntimeWarning` is emitted in that case)
+
+### Method 1: Simple Pattern (override or fallback)
 
 ```python
 atoms = pot.export_supercell_to_ase()
 
-# For BaTiO3 2x2x2 supercell: 8 cells * (1 Ba + 1 Ti + 3 O) = 8+8+24 atoms
-symbols = ['Ba'] * 8 + ['Ti'] * 8 + ['O'] * 24
+# For BaHfO3 2x2x2 supercell: 8 cells * (1 Ba + 1 Hf + 3 O) = 8+8+24 atoms
+# (Only needed if symbols weren't auto-resolved)
+symbols = ['Ba'] * 8 + ['Hf'] * 8 + ['O'] * 24
 atoms.set_chemical_symbols(symbols)
 ```
 
@@ -316,9 +322,9 @@ atoms = read('supercell.cif')  # Now with correct symbols
    - `get_supercell_structure()` returns in current units
 
 3. **Chemical Symbols**
-   - Always 'X' (unknown) from C API
-   - Must be set manually based on your system
-   - Symbol order must match atom ordering in supercell
+   - Auto-resolved from DDB metadata (`typat → znucl → element`) when the potential was constructed via `from_params`, `from_abi`, `from_pyeffpot`, or `from_config_file`
+   - Default to `'X'` only when no DDB metadata is available (e.g., constructed with bare `MultibinitPotential()` and `set_reference_structure()`)
+   - Can be overridden manually via `atoms.set_chemical_symbols(...)`
 
 4. **Atom Ordering**
    - Internal MULTIBINIT ordering may differ from input

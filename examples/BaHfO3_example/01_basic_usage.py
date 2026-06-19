@@ -14,10 +14,8 @@ How to run:
 Requirements:
     - pymultibinit installed
     - ase installed
-    - BaTiO3_DDB and BaTiO3.xml files in this directory
+    - BaHfO3_DDB and BaHfO3.xml files in this directory
     - libabinit.so/dylib accessible
-
-Note: Despite the filename prefix, the actual data is for BaHfO3.
 """
 
 import numpy as np
@@ -33,20 +31,20 @@ def main():
     
     # Method 1: Load from config file
     print("\n1. Loading potential from config file...")
-    pot = MultibinitPotential.from_config_file("BaTiO3_config.conf")
+    pot = MultibinitPotential.from_config_file("BaHfO3_config.conf")
     print("   ✓ Potential loaded successfully")
     
     # Method 2: Alternative - load from parameters directly
     # pot = MultibinitPotential.from_params(
-    #     ddb_file="BaTiO3_DDB",
-    #     sys_file="BaTiO3.xml",
+    #     ddb_file="BaHfO3_DDB",
+    #     sys_file="BaHfO3.xml",
     #     ncell=(2, 2, 2),
     #     ngqpt=(4, 4, 4),
     #     dipdip=1
     # )
     
     # Method 3: Alternative - load from .abi file
-    # pot = MultibinitPotential.from_abi("BaTiO3.abi")
+    # pot = MultibinitPotential.from_abi("BaHfO3.abi")
     
     # Build the reference 2x2x2 supercell structure
     # From the DDB file (BaHfO3 perovskite):

@@ -1,0 +1,23 @@
+# BaHfO3 MULTIBINIT model-building input template
+#
+# This file is passed as the first positional argument to the multibinit binary
+# by pymultibinit.training.train_multibinit_model(). Adapt the variables below
+# to the exact training syntax supported by your ABINIT/MULTIBINIT build.
+#
+# Resolved input paths are also exposed to the binary as environment variables:
+#   PYMULTIBINIT_DDB
+#   PYMULTIBINIT_HIST
+#   PYMULTIBINIT_OUTPUT_DIR
+#
+# The example DDB is examples/BaHfO3_example/BaHfO3_DDB. The HIST.nc file must
+# be generated separately from an ABINIT trajectory or from atomchain.
+
+# Harmonic/response input metadata
+ngqpt 4 4 4
+dipdip 1
+ncell 2 2 2
+
+# Training-control placeholders. Replace with the exact keywords required by
+# the multibinit executable used for model building.
+dynamics 0
+ntime 0
