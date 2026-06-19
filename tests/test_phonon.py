@@ -13,18 +13,23 @@ What it tests:
 
 import pytest
 import numpy as np
+from importlib import import_module
 from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from pymultibinit.pyeffpot import read_ddb
+from pymultibinit.pyeffpot import read_ddb, write_phonopy_from_ddb
 from pymultibinit.pyeffpot.phonon import (
     reduced_to_cartesian,
     calculate_phonon_frequencies,
+    get_frequencies,
+    build_unitcell_ifcs,
+    compute_dynamical_matrix,
     AMU_EMASS,
     HA_CMM1
 )
+from pymultibinit.pyeffpot.supercell_builder import build_supercell
 
 
 class TestPhonon:
@@ -32,8 +37,13 @@ class TestPhonon:
     
     @pytest.fixture
     def bto_ddb_path(self):
-        """Path to BaTiO3 DDB test file."""
+        """Path to BaHfO3 DDB test file."""
         return Path(__file__).parent.parent.parent / 'abinit/tests/v9/Input/BTO.DDB'
+
+    @pytest.fixture
+    def checked_in_bto_ddb_path(self):
+        """Path to the checked-in BaHfO3 DDB fixture."""
+        return Path(__file__).parent.parent / 'examples/BaHfO3_example/BaHfO3_DDB'
     
     def test_physical_constants(self):
         """Test physical constants."""
@@ -103,6 +113,78 @@ class TestPhonon:
         assert u.rprimd.shape == (3, 3), "Wrong rprimd shape"
         assert u.xred.shape == (u.natom, 3), "Wrong xred shape"
         assert len(u.amu) == u.ntypat, "Wrong amu length"  # amu might be list or array
+
+    def test_supercell_gamma_matches_raw_ddb_without_asr(self, checked_in_bto_ddb_path):
+        """Supercell IFC folding should preserve raw DDB Gamma when ASR is disabled."""
+        u = read_ddb(str(checked_in_bto_ddb_path))
+        raw_gamma = u.dynmat[np.argmin(np.linalg.norm(u.qpoints, axis=1)), :, :, :, :, 0]
+        raw_gamma = raw_gamma.reshape(3 * u.natom, 3 * u.natom)
+
+        ncell = (2, 2, 2)
+        sc = build_supercell(u, ncell, dipdip=False, asr=False)
+        supercell_gamma = sc.ifcs_sc.atmfrc.sum(axis=4)
+        supercell_gamma = supercell_gamma.reshape(
+            3 * sc.crystal_sc.natom, 3 * sc.crystal_sc.natom
+        )
+
+        ncells = np.prod(ncell)
+        projector = np.zeros((3 * u.natom, 3 * sc.crystal_sc.natom))
+        for icell in range(ncells):
+            for iatom in range(u.natom):
+                for idir in range(3):
+                    projector[
+                        3 * iatom + idir,
+                        3 * (iatom + u.natom * icell) + idir,
+                    ] = 1.0 / np.sqrt(ncells)
+
+        primitive_gamma = projector @ supercell_gamma @ projector.T
+        assert np.allclose(primitive_gamma, raw_gamma, atol=1e-12)
+        assert np.allclose(
+            get_frequencies(primitive_gamma, u), get_frequencies(raw_gamma, u), atol=1e-8
+        )
+
+    def test_band_helper_matches_raw_ddb_gamma_without_asr(self, checked_in_bto_ddb_path):
+        """Band helper and evaluator share raw-DDB conventions when ASR is disabled."""
+        u = read_ddb(str(checked_in_bto_ddb_path))
+        gamma_index = np.argmin(np.linalg.norm(u.qpoints, axis=1))
+        raw_gamma = u.dynmat[gamma_index, :, :, :, :, 0] + 1j * u.dynmat[
+            gamma_index, :, :, :, :, 1
+        ]
+
+        u.ifcs = build_unitcell_ifcs(u, dipdip=False, asr=False)
+        reconstructed = compute_dynamical_matrix(np.zeros(3), u)
+
+        np.testing.assert_allclose(reconstructed, raw_gamma, atol=1e-12)
+
+    def test_phonopy_export_loads_default_units(self, checked_in_bto_ddb_path, tmp_path):
+        result = write_phonopy_from_ddb(checked_in_bto_ddb_path, tmp_path)
+
+        assert result.supercell_matrix == (4, 4, 4)
+        assert result.phonopy_params_yaml.exists()
+        for name in ['phonopy.yaml', 'FORCE_CONSTANTS', 'POSCAR-unitcell']:
+            assert not (tmp_path / name).exists()
+
+        phonopy = import_module('phonopy')
+        loaded = phonopy.load(result.phonopy_params_yaml)
+        assert loaded.force_constants is not None
+        assert loaded.force_constants.shape == (5, 320, 3, 3)
+
+        units = import_module('phonopy.physical_units').get_physical_units()
+        frequencies = loaded.get_frequencies([0, 0, 0])
+        assert frequencies.shape == (15,)
+        assert np.isfinite(frequencies).all()
+
+        u = read_ddb(str(checked_in_bto_ddb_path))
+        gamma_index = np.argmin(np.linalg.norm(u.qpoints, axis=1))
+        raw_gamma = u.dynmat[gamma_index, :, :, :, :, 0] + 1j * u.dynmat[
+            gamma_index, :, :, :, :, 1
+        ]
+        raw_frequencies = get_frequencies(raw_gamma.reshape(3 * u.natom, 3 * u.natom), u)
+        np.testing.assert_allclose(
+            np.sort(frequencies * units.THzToCm),
+            np.sort(raw_frequencies),
+            atol=1e-4,
+        )
 
 
 if __name__ == '__main__':

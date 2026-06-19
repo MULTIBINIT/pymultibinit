@@ -568,14 +568,23 @@ def build_dipole_dipole_ifcs(
     to properly handle the long-range nature of dipole-dipole interactions.
     The simple real-space only method is provided for comparison and testing.
     """
+    zeff = np.asarray(zeff, dtype=float)
+    legacy_layout = zeff.ndim == 3 and zeff.shape[0:2] == (3, 3)
+    if legacy_layout:
+        zeff = np.moveaxis(zeff, 2, 0)
+
     if use_ewald and lattice_vectors is not None:
-        return ewald_dipole_dipole_gamma(
+        ifcs = ewald_dipole_dipole_gamma(
             positions_cart, lattice_vectors, epsilon_inf, zeff
         )
     else:
-        return build_dipole_dipole_ifcs_simple(
+        ifcs = build_dipole_dipole_ifcs_simple(
             positions_cart, epsilon_inf, zeff
         )
+
+    if legacy_layout:
+        return np.transpose(ifcs, (1, 0, 3, 2))
+    return ifcs
 def compute_dipdip_dynmat(
     q: np.ndarray,
     unitcell: UnitcellData,
@@ -722,5 +731,222 @@ def compute_dipdip_dynmat(
                 # Abinit convention 1: exp(i q . R)
                 block = zeff[ia].T @ dyddt_m[m] @ zeff[ib]
                 dm_dip[ia, :, ib, :] += phase * block
-                
+
     return dm_dip
+
+
+def _ewald_eta(unitcell: UnitcellData, eta: Optional[float]) -> float:
+    if eta is not None:
+        return eta
+
+    rprimd = unitcell.rprimd
+    rmet = rprimd @ rprimd.T
+    gmet_cell = np.linalg.inv(rprimd) @ np.linalg.inv(rprimd).T
+    direct = np.sum(rmet)
+    recip = np.sum(gmet_cell)
+    return float(np.pi * 100.0 / 33.0 * np.sqrt(1.69 * recip / direct))
+
+
+def _dipdip_g_indices(limit: int) -> np.ndarray:
+    g1, g2, g3 = np.meshgrid(
+        np.arange(-limit, limit + 1),
+        np.arange(-limit, limit + 1),
+        np.arange(-limit, limit + 1),
+        indexing="ij",
+    )
+    return np.stack([g1.ravel(), g2.ravel(), g3.ravel()], axis=1)
+
+
+def _compute_dipdip_reciprocal_part(
+    q: np.ndarray,
+    unitcell: UnitcellData,
+    eta_val: float,
+    g_indices: np.ndarray,
+    rec_lattice: np.ndarray,
+    volume: float,
+    sumg0: int,
+) -> np.ndarray:
+    natom = unitcell.natom
+    xcart = unitcell.xcart
+    zeff = unitcell.zeff
+    epsilon_inf = unitcell.epsilon_inf
+    assert zeff is not None and epsilon_inf is not None
+
+    ks_red = g_indices + q
+    ks_cart = ks_red @ rec_lattice
+    k_eps_k = np.einsum("gi,ij,gj->g", ks_cart, epsilon_inf, ks_cart)
+
+    mask = k_eps_k > 1e-12
+    if sumg0 == 0 and np.linalg.norm(q) < 1e-12:
+        g0_idx = np.where(np.all(g_indices == 0, axis=1))[0]
+        if len(g0_idx) > 0:
+            mask[g0_idx[0]] = False
+
+    ks = ks_cart[mask]
+    k_eps = k_eps_k[mask]
+    factor_rec = (4.0 * np.pi / volume) * np.exp(-k_eps / (4.0 * eta_val)) / k_eps
+
+    diff_tau = xcart[:, np.newaxis, :] - xcart[np.newaxis, :, :]
+    phases_rec = np.exp(1j * np.einsum("gi,abi->gab", ks, diff_tau))
+    kks = np.einsum("gi,gj->gij", ks, ks)
+    t_rec = np.einsum("g,gab,gij->aibj", factor_rec, phases_rec, kks)
+    return np.einsum("iam,iajb,jbn->imjn", zeff, t_rec, zeff).reshape(natom, 3, natom, 3)
+
+
+def _compute_dipdip_reciprocal_parts(
+    qpoints: np.ndarray,
+    unitcell: UnitcellData,
+    eta_val: float,
+    g_indices: np.ndarray,
+    rec_lattice: np.ndarray,
+    volume: float,
+    sumg0: int,
+) -> np.ndarray:
+    natom = unitcell.natom
+    xcart = unitcell.xcart
+    zeff = unitcell.zeff
+    epsilon_inf = unitcell.epsilon_inf
+    assert zeff is not None and epsilon_inf is not None
+
+    ks_red = qpoints[:, np.newaxis, :] + g_indices[np.newaxis, :, :]
+    ks_cart = np.einsum("qgi,ij->qgj", ks_red, rec_lattice)
+    k_eps_k = np.einsum("qgi,ij,qgj->qg", ks_cart, epsilon_inf, ks_cart)
+
+    mask = k_eps_k > 1e-12
+    if sumg0 == 0:
+        gamma_q = np.linalg.norm(qpoints, axis=1) < 1e-12
+        g0_idx = np.where(np.all(g_indices == 0, axis=1))[0]
+        if len(g0_idx) > 0 and np.any(gamma_q):
+            mask[gamma_q, g0_idx[0]] = False
+
+    factor_rec = np.zeros_like(k_eps_k, dtype=float)
+    factor_rec[mask] = (
+        (4.0 * np.pi / volume)
+        * np.exp(-k_eps_k[mask] / (4.0 * eta_val))
+        / k_eps_k[mask]
+    )
+
+    diff_tau = xcart[:, np.newaxis, :] - xcart[np.newaxis, :, :]
+    phases_rec = np.exp(1j * np.einsum("qgi,abi->qgab", ks_cart, diff_tau))
+    kks = np.einsum("qgi,qgj->qgij", ks_cart, ks_cart)
+    t_rec = np.einsum("qg,qgab,qgmn->qambn", factor_rec, phases_rec, kks)
+    return np.einsum("iam,qiajb,jbn->qimjn", zeff, t_rec, zeff).reshape(
+        len(qpoints), natom, 3, natom, 3
+    )
+
+
+def _precompute_dipdip_real_terms(
+    unitcell: UnitcellData,
+    eta_val: float,
+    nreal: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    natom = unitcell.natom
+    rprimd = unitcell.rprimd
+    xcart = unitcell.xcart
+    zeff = unitcell.zeff
+    epsilon_inf = unitcell.epsilon_inf
+    assert zeff is not None and epsilon_inf is not None
+
+    r1, r2, r3 = np.meshgrid(
+        np.arange(-nreal, nreal + 1),
+        np.arange(-nreal, nreal + 1),
+        np.arange(-nreal, nreal + 1),
+        indexing="ij",
+    )
+    r_indices = np.stack([r1.ravel(), r2.ravel(), r3.ravel()], axis=1)
+    real_blocks = np.zeros((len(r_indices), natom, 3, natom, 3), dtype=complex)
+
+    try:
+        from scipy.special import erfc
+    except ImportError:
+        erfc = _erfc_approx
+
+    inv_eps = np.linalg.inv(epsilon_inf)
+    det_eps = np.linalg.det(epsilon_inf)
+    inv_det_eps = 1.0 / np.sqrt(det_eps)
+    reta = np.sqrt(eta_val)
+    diag_val = (4.0 / 3.0 / np.pi**0.5) * (reta**3) * inv_det_eps * inv_eps.T
+    diff_tau = xcart[:, np.newaxis, :] - xcart[np.newaxis, :, :]
+
+    for ir, r_idx in enumerate(r_indices):
+        r_cart = r_idx @ rprimd
+        rij = r_cart[None, None, :] + diff_tau
+
+        if np.all(r_idx == 0):
+            for iatom in range(natom):
+                real_blocks[ir, iatom, :, iatom, :] -= np.einsum(
+                    "mi,mn,np->ip", zeff[iatom], diag_val, zeff[iatom]
+                )
+
+            mask = np.ones((natom, natom), dtype=bool)
+            np.fill_diagonal(mask, False)
+        else:
+            mask = np.ones((natom, natom), dtype=bool)
+
+        if not np.any(mask):
+            continue
+
+        r_m = rij[mask]
+        r_eps_r = np.einsum("mi,ij,mj->m", r_m, inv_eps, r_m)
+        r_norm_eps = np.sqrt(r_eps_r)
+        y = reta * r_norm_eps
+
+        invy = 1.0 / y
+        erfc_y = erfc(y)
+        exp_y2 = np.exp(-(y**2))
+        fact_pi = 2.0 / np.sqrt(np.pi)
+
+        term2 = erfc_y * invy**3
+        term3 = fact_pi * exp_y2 * invy**2
+        term4 = -(term2 + term3)
+        term5 = 3.0 * term2 + term3 * (3.0 + 2.0 * y**2)
+
+        scaled_r = r_m @ inv_eps.T
+        dyddt_m = (
+            term5[:, None, None]
+            * np.einsum("mi,mj->mij", scaled_r, scaled_r)
+            / (r_eps_r[:, None, None] + 1e-18)
+            + term4[:, None, None] * inv_eps.T[None, :, :]
+        )
+        dyddt_m *= -(reta**3) * inv_det_eps
+
+        idx_i, idx_j = np.where(mask)
+        for m, (ia, ib) in enumerate(zip(idx_i, idx_j)):
+            real_blocks[ir, ia, :, ib, :] += zeff[ia].T @ dyddt_m[m] @ zeff[ib]
+
+    return r_indices, real_blocks
+
+
+def compute_dipdip_dynmats(
+    qpoints: np.ndarray,
+    unitcell: UnitcellData,
+    eta: Optional[float] = None,
+    nreal: int = 5,
+    nrecip: int = 8,
+    sumg0: int = 1,
+) -> np.ndarray:
+    """Compute Ewald dipole-dipole dynamical matrices for many q-points.
+
+    This uses the same formula as :func:`compute_dipdip_dynmat`, but caches the
+    q-independent real-space Ewald blocks across all q-points.
+    """
+    qpoints = np.asarray(qpoints, dtype=float)
+    natom = unitcell.natom
+    if unitcell.zeff is None or unitcell.epsilon_inf is None:
+        return np.zeros((len(qpoints), natom, 3, natom, 3), dtype=complex)
+
+    eta_val = _ewald_eta(unitcell, eta)
+    rprimd = unitcell.rprimd
+    volume = np.abs(np.linalg.det(rprimd))
+    rec_lattice = 2 * np.pi * np.linalg.inv(rprimd).T
+    g_indices = _dipdip_g_indices(nrecip)
+    r_indices, real_blocks = _precompute_dipdip_real_terms(unitcell, eta_val, nreal)
+
+    out = _compute_dipdip_reciprocal_parts(
+        qpoints, unitcell, eta_val, g_indices, rec_lattice, volume, sumg0
+    )
+    for iq, q in enumerate(qpoints):
+        phases = np.exp(-2j * np.pi * (r_indices @ q))
+        out[iq] += np.einsum("r,raibj->aibj", phases, real_blocks)
+
+    return out

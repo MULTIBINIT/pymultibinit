@@ -31,6 +31,7 @@ Example:
 from .potential import MultibinitPotential
 from .calculator import MultibinitCalculator
 from .wrapper_cffi import MultibinitWrapperCFFI
+from .pyeffpot import PhonopyDdbExportResult, write_phonopy_from_ddb
 
 # Atom matching utilities
 from . import atom_matching
@@ -38,15 +39,102 @@ from . import atom_matching
 # Configuration file support
 from .config import MultibinitConfig
 
+# Binary-based model building support
+from .features import (
+    evaluate_basis_features_vectorized,
+    evaluate_basis_features_jax,
+    evaluate_basis_features_auto,
+    compile_basis,
+    compile_term,
+    CompiledTerm,
+)
+from .training import (
+    MultibinitTrainingResult,
+    FitDiagnostics,
+    FitFeatureMatrices,
+    FortranPairList,
+    GreedySelectionResult,
+    GoalFunctionComponents,
+    LinearFitResult,
+    MonomialKey,
+    PairKey,
+    PythonFitConfig,
+    PythonFitResult,
+    TrainingDataset,
+    TrainingFrame,
+    XmlBasisFunction,
+    basis_to_coefficients,
+    build_factor_action_map,
+    build_training_dataset,
+    canonicalize_monomial_orbit,
+    compute_goal_function,
+    count_fortran_displacement_coefficients,
+    count_fortran_irreducible_pair_combinations,
+    displacement_pair_diagnostics,
+    evaluate_basis_features,
+    fit_multibinit_model_python,
+    generate_displacement_basis,
+    generate_fortran_anchored_basis,
+    generate_fortran_displacement_combination_keys,
+    generate_fortran_pair_list,
+    load_xml_basis,
+    normalize_pair_key,
+    read_hist_frames,
+    select_greedy_coefficients,
+    train_multibinit_model,
+    with_fortran_text_labels,
+    write_fitted_xml,
+)
+
 __version__ = "0.2.0"
 
 __all__ = [
+    "CompiledTerm",
+    "compile_basis",
+    "compile_term",
+    "evaluate_basis_features_auto",
+    "evaluate_basis_features_jax",
+    "evaluate_basis_features_vectorized",
     "MultibinitPotential",
     "MultibinitCalculator", 
     "MultibinitWrapperCFFI",
     "MultibinitConfig",
+    "PhonopyDdbExportResult",
+    "MultibinitTrainingResult",
+    "FitDiagnostics",
+    "FitFeatureMatrices",
+    "FortranPairList",
+    "GreedySelectionResult",
+    "GoalFunctionComponents",
+    "LinearFitResult",
+    "MonomialKey",
+    "PairKey",
+    "PythonFitConfig",
+    "PythonFitResult",
+    "TrainingDataset",
+    "TrainingFrame",
+    "XmlBasisFunction",
     "atom_matching",
+    "basis_to_coefficients",
+    "build_factor_action_map",
+    "build_training_dataset",
+    "canonicalize_monomial_orbit",
+    "compute_goal_function",
+    "count_fortran_displacement_coefficients",
+    "count_fortran_irreducible_pair_combinations",
+    "displacement_pair_diagnostics",
+    "evaluate_basis_features",
+    "fit_multibinit_model_python",
+    "generate_displacement_basis",
+    "generate_fortran_anchored_basis",
+    "generate_fortran_displacement_combination_keys",
+    "generate_fortran_pair_list",
+    "load_xml_basis",
+    "normalize_pair_key",
+    "read_hist_frames",
+    "select_greedy_coefficients",
+    "train_multibinit_model",
+    "with_fortran_text_labels",
+    "write_phonopy_from_ddb",
+    "write_fitted_xml",
 ]
-
-
-

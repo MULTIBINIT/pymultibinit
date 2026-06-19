@@ -33,12 +33,18 @@ class TestXMLParser:
     @pytest.fixture
     def test_file(self):
         """Path to test coefficient file."""
-        return Path(__file__).parent.parent.parent / 'abinit/tests/tutomultibinit/Input/tmulti_l_7_1_coeffs.xml'
+        path = Path(__file__).parent.parent.parent / 'abinit/tests/tutomultibinit/Input/tmulti_l_7_1_coeffs.xml'
+        if not path.exists():
+            pytest.skip(f"ABINIT reference XML not available: {path}")
+        return path
     
     @pytest.fixture
     def test_file2(self):
         """Path to another test coefficient file."""
-        return Path(__file__).parent.parent.parent / 'abinit/tests/tutomultibinit/Input/tmulti_l_8_1.xml'
+        path = Path(__file__).parent.parent.parent / 'abinit/tests/tutomultibinit/Input/tmulti_l_8_1.xml'
+        if not path.exists():
+            pytest.skip(f"ABINIT reference XML not available: {path}")
+        return path
     
     def test_read_coefficients(self, test_file):
         """Test reading coefficient file."""

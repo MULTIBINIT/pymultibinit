@@ -10,11 +10,12 @@ How to run:
 import pytest
 import tempfile
 import os
+from importlib import import_module
 import numpy as np
 from pathlib import Path
 from ase import Atoms
 from ase.io import read, write
-from pymultibinit.cli import make_supercell, export_reference
+from pymultibinit.cli import make_supercell, export_reference, ddb_to_phonopy, main
 from pymultibinit.config import MultibinitConfig  # type: ignore
 
 
@@ -258,7 +259,8 @@ class TestExportRef:
         finally:
             if os.path.exists(ref_path):
                 os.unlink(ref_path)
-    
+
+
     def test_export_ref_with_symbols(self, config_file_abi, unit_cell_file):
         """Test exporting with --symbols option (legacy, now prints warning)."""
         # The --symbols parameter is now deprecated since we auto-detect from znucl
@@ -338,6 +340,35 @@ class TestExportRef:
             for f in [supercell_path, ref_path]:
                 if os.path.exists(f):
                     os.unlink(f)
+
+
+class TestDdbToPhonopy:
+    @pytest.fixture
+    def checked_in_bto_ddb_path(self):
+        return Path(__file__).parent.parent / 'examples/BaHfO3_example/BaHfO3_DDB'
+
+    def test_ddb_to_phonopy_writes_loadable_files(self, checked_in_bto_ddb_path, tmp_path):
+        result = ddb_to_phonopy(str(checked_in_bto_ddb_path), str(tmp_path), verbose=True)
+
+        assert result == 0
+        assert (tmp_path / 'phonopy_params.yaml').exists()
+        for name in ['phonopy.yaml', 'FORCE_CONSTANTS', 'POSCAR-unitcell']:
+            assert not (tmp_path / name).exists()
+
+        phonopy = import_module('phonopy')
+        loaded = phonopy.load(tmp_path / 'phonopy_params.yaml')
+        assert loaded.force_constants is not None
+        assert loaded.force_constants.shape == (5, 320, 3, 3)
+
+    def test_main_help_includes_ddb_to_phonopy(self, monkeypatch, capsys):
+        monkeypatch.setattr('sys.argv', ['mbtools', '--help'])
+
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+
+        assert excinfo.value.code == 0
+        captured = capsys.readouterr()
+        assert 'ddb-to-phonopy' in captured.out
 
 
 class TestCLIEdgeCases:

@@ -13,9 +13,9 @@ Format specification from Fortran source:
 
 Perturbation indices:
 - 1..natom: atomic displacements
-- natom+1..natom+3: electric field
-- natom+3: stress (isotropic)
-- natom+4..natom+9: strain (Voigt notation)
+- natom+2: electric field in ABINIT DDB response blocks
+- natom+3: diagonal homogeneous strain, idir=1..3 -> xx, yy, zz
+- natom+4: shear homogeneous strain, idir=1..3 -> yz, xz, xy
 """
 import re
 import numpy as np
@@ -24,6 +24,15 @@ from typing import Optional, List, Dict, Any, Tuple, Union
 
 from .datastructures import CrystalInfo, IFCData, UnitcellData
 from .symmetry import build_atom_mapping, expand_zeff_by_symmetry
+
+
+def _strain_perturbation_to_voigt(idir: int, ipert: int, natom: int) -> Optional[int]:
+    """Map ABINIT DDB homogeneous-strain perturbations to Voigt order."""
+    if ipert == natom + 3 and 1 <= idir <= 3:
+        return idir - 1
+    if ipert == natom + 4 and 1 <= idir <= 3:
+        return idir + 2
+    return None
 
 
 @dataclass
@@ -35,6 +44,7 @@ class DDBBlock:
     qnrm: float  # q-point norm
     data: Union[np.ndarray, Dict[str, Any], None] = None  # Parsed data (array or dict)
     raw_lines: Optional[List[str]] = None  # Original lines for debugging
+    derivatives: Optional[Dict[Tuple[int, int, int, int], complex]] = None
 
 
 class DDBParser:
@@ -42,7 +52,7 @@ class DDBParser:
     Complete DDB file parser matching Fortran implementation.
     
     Usage:
-        parser = DDBParser('BaTiO3.DDB')
+        parser = DDBParser('BaHfO3.DDB')
         unitcell = parser.parse()
     """
     
@@ -169,20 +179,21 @@ class DDBParser:
                 self.data['amu'] = np.array(values, dtype=float)
                 self._next_line()
             elif line.strip().startswith('symrel'):
-                # Parse all symmetry operations (nsym of them)
+                # Parse all symmetry operations (nsym of them). ABINIT writes
+                # symrel in Fortran column-major order.
                 nsym = self.data.get('nsym', 0)
                 symrel_list = []
                 # First sym op may be on same line as 'symrel'
                 vals = [int(x) for x in line.split()[1:]]
                 if len(vals) >= 9:
-                    symrel_list.append(np.array(vals[:9]).reshape(3, 3))
+                    symrel_list.append(np.array(vals[:9]).reshape(3, 3, order='F'))
                 self._next_line()
                 while len(symrel_list) < nsym and self.current_line < self.nlines:
                     next_line = self._current_line()
                     try:
                         vals = [int(x) for x in next_line.split()]
                         if len(vals) >= 9:
-                            symrel_list.append(np.array(vals[:9]).reshape(3, 3))
+                            symrel_list.append(np.array(vals[:9]).reshape(3, 3, order='F'))
                             self._next_line()
                         else:
                             break
@@ -190,6 +201,26 @@ class DDBParser:
                         break
                 if symrel_list:
                     self.data['symrel'] = np.array(symrel_list, dtype=int)
+            elif line.strip().startswith('tnons'):
+                nsym = self.data.get('nsym', 0)
+                tnons_list = []
+                values = self._read_floats(line)
+                if len(values) >= 3:
+                    tnons_list.append(values[:3])
+                self._next_line()
+                while len(tnons_list) < nsym and self.current_line < self.nlines:
+                    next_line = self._current_line()
+                    try:
+                        values = self._read_floats(next_line)
+                        if len(values) >= 3:
+                            tnons_list.append(values[:3])
+                            self._next_line()
+                        else:
+                            break
+                    except ValueError:
+                        break
+                if tnons_list:
+                    self.data['tnons'] = np.array(tnons_list, dtype=float)
             elif 'xred' in line.lower():
                 break  # End of header
             else:
@@ -197,7 +228,6 @@ class DDBParser:
     
     def _parse_kpoints(self):
         """Parse k-point grid (skip for now)."""
-        natom = self.data.get('natom', 0)
         # Skip k-points - look for xred or end of k-point section
         lines_read = 0
         max_kpoints = 1000  # Safety limit
@@ -259,6 +289,7 @@ class DDBParser:
             # Look for start of derivative database section
             if 'Database of total energy derivatives' in line:
                 self._next_line()  # Skip this line
+                self._skip_empty()
                 # Next should be "Number of data blocks"
                 if self.current_line < self.nlines:
                     nblocks_line = self._next_line()
@@ -357,8 +388,6 @@ class DDBParser:
         
         # Read elements
         # Storage: val(idir, ipert, idir2, ipert2)
-        # Flattened index: idir + 3*((ipert-1) + mpert*((idir2-1) + 3*(ipert2-1)))
-        mpert = natom  # For IFCs, perturbations are atoms
         data = {}
         
         for ielem in range(block.nelmts):
@@ -378,6 +407,7 @@ class DDBParser:
             # Store complex value
             key = (idir1, ipert1, idir2, ipert2)
             data[key] = ar + 1j * ai
+        block.derivatives = data
         
         # Convert to IFC array: (natom, 3, natom, 3) complex
         dm_complex = np.zeros((natom, 3, natom, 3), dtype=complex)
@@ -447,7 +477,6 @@ class DDBParser:
         parts = line.split()
         if len(parts) >= 2:
             ar = float(parts[0].replace('D', 'E').replace('d', 'e'))
-            ai = float(parts[1].replace('D', 'E').replace('d', 'e'))
             block.data = {'energy': ar}
         else:
             block.data = {'energy': 0.0}
@@ -490,7 +519,6 @@ class DDBParser:
     def _extract_quantities(self):
         """Extract physical quantities from blocks (matching ABINIT cart29)."""
         natom = self.data['natom']
-        ntypat = self.data['ntypat']
         typat = self.data['typat']
         
         # Get ionic charges from zion (if available) or znucl
@@ -518,6 +546,7 @@ class DDBParser:
         zeff = np.zeros((natom, 3, 3))
         ifcs = np.zeros((natom, 3, natom, 3))
         elastic_constants = np.zeros((6, 6))
+        strain_coupling = np.zeros((6, 3, natom))
         strten = np.zeros(6)
         fcart = np.zeros((natom, 3))
         energy = 0.0
@@ -549,27 +578,40 @@ class DDBParser:
                         
                         if np.allclose(block.qpt, 0):
                             ifcs = phi_cart.real
+
+                if np.allclose(block.qpt, 0) and block.derivatives:
+                    block_elastic, block_strain_coupling = self._extract_strain_derivatives(block.derivatives, mat_MP)
+                    elastic_constants += block_elastic
+                    strain_coupling += block_strain_coupling
                 
                 # 2. Extract Born Effective Charges and Dielectric Tensor (only from q=0 block)
                 if block.raw_lines and np.allclose(block.qpt, 0):
                     # Parse mixed terms from raw lines
                     d2E_atom_E = np.zeros((natom, 3, 3))
                     d2E_E_E = np.zeros((3, 3))
+                    has_electric_terms = False
                     for line in block.raw_lines:
                         parts = line.split()
-                        if len(parts) < 6: continue
+                        if len(parts) < 6:
+                            continue
                         try:
                             idir1, ipert1, idir2, ipert2 = map(int, parts[:4])
                             ar = float(parts[4].replace('D', 'E').replace('d', 'e'))
                             
                             if 1 <= ipert1 <= natom and ipert2 == natom + 2:
                                 d2E_atom_E[ipert1-1, idir1-1, idir2-1] = ar
+                                has_electric_terms = True
                             elif ipert1 == natom + 2 and 1 <= ipert2 <= natom:
                                 d2E_atom_E[ipert2-1, idir2-1, idir1-1] = ar
+                                has_electric_terms = True
                             elif ipert1 == natom + 2 and ipert2 == natom + 2:
                                 d2E_E_E[idir1-1, idir2-1] = ar
+                                has_electric_terms = True
                         except (ValueError, IndexError):
                             continue
+
+                    if not has_electric_terms:
+                        continue
 
                     # Transform Born Effective Charges: Z_cart = trans_ME @ Z_red @ trans_MP.T
                     for iat in range(natom):
@@ -614,6 +656,7 @@ class DDBParser:
         self.data['zeff'] = zeff
         self.data['ifcs'] = ifcs
         self.data['elastic_constants'] = elastic_constants
+        self.data['strain_coupling'] = strain_coupling
         self.data['strten'] = strten
         self.data['fcart'] = fcart
         self.data['energy'] = energy
@@ -621,6 +664,32 @@ class DDBParser:
         self.data['qpoints'] = np.array(qpoints_list) if qpoints_list else None
         self.data['dynmat'] = np.stack(dynmat_list, axis=0) if dynmat_list else None
         self.data['ngqpt'] = self._infer_ngqpt(np.array(qpoints_list)) if qpoints_list else np.array([1, 1, 1])
+
+    def _extract_strain_derivatives(self, derivatives: Dict[Tuple[int, int, int, int], complex], mat_MP: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract Gamma elastic and internal-strain terms from raw DDB derivatives."""
+        natom = self.data['natom']
+        elastic_constants = np.zeros((6, 6), dtype=float)
+        strain_coupling_red = np.zeros((6, 3, natom), dtype=float)
+
+        for (idir1, ipert1, idir2, ipert2), value in derivatives.items():
+            strain1 = _strain_perturbation_to_voigt(idir1, ipert1, natom)
+            strain2 = _strain_perturbation_to_voigt(idir2, ipert2, natom)
+            real_value = float(np.real(value))
+            if strain1 is not None and strain2 is not None:
+                elastic_constants[strain1, strain2] = real_value
+                elastic_constants[strain2, strain1] = real_value
+                continue
+
+            if strain1 is not None and 1 <= ipert2 <= natom and 1 <= idir2 <= 3:
+                strain_coupling_red[strain1, idir2 - 1, ipert2 - 1] = real_value
+            elif strain2 is not None and 1 <= ipert1 <= natom and 1 <= idir1 <= 3:
+                strain_coupling_red[strain2, idir1 - 1, ipert1 - 1] = real_value
+
+        strain_coupling = np.zeros_like(strain_coupling_red)
+        for alpha in range(6):
+            for iatom in range(natom):
+                strain_coupling[alpha, :, iatom] = mat_MP @ strain_coupling_red[alpha, :, iatom]
+        return elastic_constants, strain_coupling
     
     def _infer_ngqpt(self, qpoints: np.ndarray) -> np.ndarray:
         """
@@ -679,6 +748,7 @@ class DDBParser:
         )
 
         symrel_raw = self.data.get('symrel', None)
+        tnons_raw = self.data.get('tnons', None)
 
         return UnitcellData(
             crystal=crystal,
@@ -686,6 +756,7 @@ class DDBParser:
             ifcs=ifc_data,
             epsilon_inf=self.data.get('epsilon_inf', np.eye(3)),
             elastic_constants=self.data.get('elastic_constants', np.zeros((6, 6))),
+            strain_coupling=self.data.get('strain_coupling', np.zeros((6, 3, natom))),
             zeff=self.data.get('zeff', np.zeros((natom, 3, 3))),
             acell=acell,
             qpoints=self.data.get('qpoints', None),
@@ -693,6 +764,7 @@ class DDBParser:
             blocks=self.blocks,
             ngqpt=self.data.get('ngqpt', None),
             symrel=symrel_raw,
+            tnons=tnons_raw,
             nqshft=1,
             q1shft=np.zeros((1, 3)),
             atom_mapping=self.data.get('atom_mapping', None),

@@ -164,7 +164,7 @@ class MultibinitConfig:
                     "Please remove this parameter from your configuration file.",
                     DeprecationWarning, stacklevel=2
                 )
-                self.use_atomic_units = False  # Always False now
+                self.use_atomic_units = self._parse_bool(value)
             elif key == 'auto_match_atoms':
                 self.auto_match_atoms = self._parse_bool(value)
             elif key == 'match_tolerance':

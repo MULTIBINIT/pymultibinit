@@ -24,9 +24,13 @@ from pymultibinit.pyeffpot.datastructures import (
 from pymultibinit.pyeffpot.supercell_builder import (
     build_supercell,
     _build_supercell_geometry,
+    _supercell_atom_index,
     _apply_asr,
     set_anharmonic_coeffs
 )
+import pymultibinit.pyeffpot.supercell_builder as supercell_builder
+from pymultibinit.pyeffpot.potential import EffectivePotential
+from pymultibinit.pyeffpot.xml_parser import PolynomialCoefficient, PolynomialTerm
 from pymultibinit.pyeffpot import read_ddb
 
 
@@ -116,6 +120,21 @@ class TestSupercellBuilder:
         # Check IFCs exist
         assert supercell.ifcs_sc is not None
         assert supercell.ifcs_sc.atmfrc.shape[1] == supercell.natom_sc
+
+    def test_build_supercell_can_disable_dipdip(self, simple_unitcell, monkeypatch):
+        simple_unitcell.zeff = np.ones((3, 3, 2))
+        calls = []
+
+        def fake_dipdip(ifcs_sc, unitcell, crystal_sc, ncell):
+            calls.append(True)
+            ifcs_sc.atmfrc += 1.0
+
+        monkeypatch.setattr(supercell_builder, "_compute_dipole_dipole", fake_dipdip)
+
+        build_supercell(simple_unitcell, (1, 1, 1), dipdip=False)
+        assert calls == []
+        build_supercell(simple_unitcell, (1, 1, 1), dipdip=True)
+        assert len(calls) == 1
         
     def test_asr_enforcement(self):
         """Test acoustic sum rule enforcement."""
@@ -179,6 +198,49 @@ class TestSupercellBuilder:
             supercell = build_supercell(simple_unitcell, ncell)
             expected_natom = simple_unitcell.natom * ncell[0] * ncell[1] * ncell[2]
             assert supercell.natom_sc == expected_natom
+
+    def test_supercell_atom_index_matches_geometry_order(self, simple_unitcell):
+        ncell = (2, 3, 4)
+        crystal_sc = _build_supercell_geometry(simple_unitcell.crystal, ncell)
+
+        index = _supercell_atom_index(atom_uc=1, ix=1, iy=2, iz=3, ncell=ncell, natom_uc=simple_unitcell.natom)
+
+        np.testing.assert_allclose(crystal_sc.xred[index], [(1.0 + 0.5) / 2.0, (2.0 + 0.5) / 3.0, (3.0 + 0.5) / 4.0])
+        assert crystal_sc.typat[index] == simple_unitcell.crystal.typat[1]
+
+    def test_anharmonic_xml_indices_follow_geometry_order_for_noncubic_cells(self, simple_unitcell):
+        ncell = (2, 3, 4)
+        supercell = build_supercell(simple_unitcell, ncell)
+        term = PolynomialTerm(
+            weight=1.0,
+            displacements=[
+                {
+                    "atom_a": 0,
+                    "atom_b": 0,
+                    "direction": "x",
+                    "power": 2,
+                    "cell_a": [0, 0, 0],
+                    "cell_b": [1, 0, 0],
+                }
+            ],
+        )
+        coeff = PolynomialCoefficient(number=1, value=1.0, text="shift-x", terms=[term])
+        set_anharmonic_coeffs(supercell, [coeff])
+        potential = EffectivePotential(supercell)
+        displacements = np.zeros((supercell.natom_sc, 3), dtype=float)
+        displacements[:, 0] = np.arange(supercell.natom_sc, dtype=float)
+
+        energy, _, _ = potential._evaluate_anharmonic(displacements, np.zeros((3, 3)))
+
+        natom_uc = simple_unitcell.natom
+        expected = 0.0
+        for ix in range(ncell[0]):
+            for iy in range(ncell[1]):
+                for iz in range(ncell[2]):
+                    ia = _supercell_atom_index(0, ix, iy, iz, ncell, natom_uc)
+                    ib = _supercell_atom_index(0, (ix + 1) % ncell[0], iy, iz, ncell, natom_uc)
+                    expected += (displacements[ib, 0] - displacements[ia, 0]) ** 2
+        assert energy == pytest.approx(expected)
 
     def test_read_ddb_integrates_with_supercell_builder(self):
         """Test exported read_ddb output works with build_supercell."""
