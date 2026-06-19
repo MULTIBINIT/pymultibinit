@@ -3,6 +3,9 @@ doc/refs/*.pdf
 
 uv.lock
 
+# MemNotes knowledge vault (project-local, not part of package)
+memnotes/
+
 # vim files
 *.swp
 

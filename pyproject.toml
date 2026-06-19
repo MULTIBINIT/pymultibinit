@@ -1,16 +1,18 @@
 [project]
 name = "pymultibinit"
-version = "0.2.0"
+version = "0.3.2"
 description = "Add your description here"
 readme = "README.md"
 authors = [
     { name = "Xu He", email = "x.he@uliege.be" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "ase>=3.26.0",
     "cffi>=2.0.0",
     "numpy>=2.2.6",
+    "phonopy>=3.0.0",
+    "scipy>=1.15.3",
 ]
 
 [project.scripts]
