@@ -14,6 +14,7 @@ Usage:
 """
 import sys
 import argparse
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -215,6 +216,148 @@ def make_supercell(unit_cell_file: str, output_file: str,
         return 1
 
 
+def ddb_to_phonopy(ddb: str, output_dir: str,
+                   supercell: tuple[int, int, int] | None = None,
+                   overwrite: bool = True,
+                   verbose: bool = False) -> int:
+    try:
+        from pymultibinit.pyeffpot import write_phonopy_from_ddb
+    except ImportError as e:
+        print(f"Error: Required package not installed: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        result = write_phonopy_from_ddb(
+            ddb,
+            output_dir,
+            supercell_matrix=supercell,
+            overwrite=overwrite,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+    if verbose:
+        print("DDB-to-phonopy export completed")
+        print(f"  Output directory: {result.output_dir}")
+        print(f"  Supercell/q-grid: {result.supercell_matrix}")
+        print(f"  phonopy_params.yaml: {result.phonopy_params_yaml}")
+    return 0
+
+
+def train_model(ddb: str, hist: str, config: Optional[str] = None,
+                output_dir: str = "multibinit_training",
+                executable: Optional[str] = None,
+                extra_args: Optional[list[str]] = None,
+                verbose: bool = False) -> int:
+    """Build a MULTIBINIT model by calling the multibinit binary."""
+    try:
+        from pymultibinit.training import train_multibinit_model
+    except ImportError as e:
+        print(f"Error: Required package not installed: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        result = train_multibinit_model(
+            ddb=ddb,
+            hist=hist,
+            config=config,
+            output_dir=output_dir,
+            executable=executable,
+            extra_args=extra_args,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+    if verbose:
+        print("MULTIBINIT training completed")
+        print(f"  Output directory: {result.output_dir}")
+        print(f"  Metadata: {result.metadata_file}")
+        print(f"  stdout log: {result.log_file}")
+        print(f"  stderr log: {result.stderr_file}")
+        if result.model_config:
+            print(f"  Model config: {result.model_config}")
+    return 0
+
+
+def train_model_python(ddb: str, hist: str, basis_xml: str, output_xml: str,
+                       diagnostics_json: str, ncell: tuple[int, int, int],
+                       selection: str = "all", ncoeff: Optional[int] = None,
+                       regularization: float = 0.0, verbose: bool = False) -> int:
+    """Fit a MULTIBINIT XML model using the pure-Python pipeline."""
+    try:
+        from pymultibinit.training import PythonFitConfig, fit_multibinit_model_python
+    except ImportError as e:
+        print(f"Error: Required package not installed: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        config = PythonFitConfig(ncell=ncell, selection=selection, ncoeff=ncoeff, regularization=regularization)
+        result = fit_multibinit_model_python(
+            ddb=ddb,
+            hist=hist,
+            basis_xml=basis_xml,
+            output_xml=output_xml,
+            config=config,
+        )
+        diagnostics_path = Path(diagnostics_json)
+        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+        diagnostics_path.write_text(json.dumps(_python_fit_diagnostics(result), indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+    if verbose:
+        print("Pure-Python training completed")
+        print(f"  Output XML: {result.output_xml}")
+        print(f"  Diagnostics: {diagnostics_json}")
+        print(f"  Coefficients: {result.ncoeff}")
+        print(f"  Frames: {result.nframes}")
+    return 0
+
+
+def _python_fit_diagnostics(result) -> dict:
+    diag = result.diagnostics
+    goal = diag.goal
+    return {
+        "coefficients": result.coefficients.tolist(),
+        "output_xml": result.output_xml,
+        "ncoeff": result.ncoeff,
+        "nframes": result.nframes,
+        "ddb": result.ddb,
+        "hist": result.hist,
+        "basis_xml": result.basis_xml,
+        "goal": {
+            "force_stress": _json_float(goal.force_stress),
+            "force": _json_float(goal.force),
+            "stress": _json_float(goal.stress),
+            "energy": _json_float(goal.energy),
+        },
+        "residual_norm": _json_float(diag.residual_norm),
+        "matrix_rank": diag.matrix_rank,
+        "condition_number": _json_float(diag.condition_number),
+        "regularization": _json_float(diag.regularization),
+        "info": diag.info,
+    }
+
+
+def _json_float(value):
+    import math
+
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -231,6 +374,14 @@ Examples:
   mbtools export-ref config.conf structure.cif --verbose
   mbtools export-ref config.conf structure.xyz -f xyz -s "Ba,Ti,O,O,O"
   mbtools export-ref config.conf ref.cif --from-structure supercell.cif
+
+  # Build a model by delegating to the multibinit binary
+  mbtools train system.ddb training_HIST.nc --config train.abi --output-dir model_out
+
+  # Fit XML coefficients without invoking multibinit
+  mbtools train-python system.ddb training_HIST.nc basis.xml --output-xml fitted.xml
+
+  mbtools ddb-to-phonopy system_DDB phonopy_from_ddb --verbose
 
 For more information, see: https://github.com/abinit/pymultibinit
         """
@@ -302,6 +453,74 @@ Examples:
                                       'Auto-detected from extension if not specified.')
     supercell_parser.add_argument('--verbose', '-v', action='store_true',
                                  help='Print detailed information')
+
+    ddb_phonopy_parser = subparsers.add_parser(
+        'ddb-to-phonopy',
+        help='Export ABINIT DDB harmonic data to phonopy files',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='Generate phonopy_params.yaml from a DDB file.',
+        epilog="""
+The default supercell is the DDB q-point grid. If --supercell is supplied, it
+must match that grid.
+
+Examples:
+  mbtools ddb-to-phonopy system_DDB phonopy_from_ddb
+  mbtools ddb-to-phonopy system_DDB phonopy_from_ddb --supercell 4 4 4
+        """
+    )
+    ddb_phonopy_parser.add_argument('ddb', type=str, help='Input ABINIT DDB file')
+    ddb_phonopy_parser.add_argument('output_dir', type=str, help='Output directory for phonopy_params.yaml')
+    ddb_phonopy_parser.add_argument('--supercell', type=int, nargs=3, default=None, metavar=('NX', 'NY', 'NZ'), help='Diagonal supercell/q-grid dimensions')
+    ddb_phonopy_parser.add_argument('--no-overwrite', action='store_true', help='Fail if output files already exist')
+    ddb_phonopy_parser.add_argument('--verbose', '-v', action='store_true', help='Print detailed information')
+
+    # train subcommand
+    train_parser = subparsers.add_parser(
+        'train',
+        help='Build a MULTIBINIT model using the multibinit binary',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='Invoke the multibinit executable for model building from DDB and HIST inputs.',
+        epilog="""
+The binary is resolved from --executable, MULTIBINIT_BINARY,
+PYMULTIBINIT_MULTIBINIT_BINARY, or PATH. DDB/HIST paths are exposed to the
+binary through PYMULTIBINIT_DDB and PYMULTIBINIT_HIST. If --config is supplied,
+it is passed as the first positional argument to the binary.
+
+Examples:
+  mbtools train system.ddb training_HIST.nc --config train.abi --output-dir model_out
+  mbtools train system.ddb training_HIST.nc --executable /path/to/multibinit --binary-arg=--dry-run
+        """
+    )
+    train_parser.add_argument('ddb', type=str, help='Input DDB file')
+    train_parser.add_argument('hist', type=str, help='Input HIST.nc file')
+    train_parser.add_argument('--config', type=str, default=None,
+                              help='MULTIBINIT training input/config file passed to the binary')
+    train_parser.add_argument('--output-dir', type=str, default='multibinit_training',
+                              help='Directory for logs, metadata, and generated model files')
+    train_parser.add_argument('--executable', type=str, default=None,
+                              help='Path to multibinit executable')
+    train_parser.add_argument('--verbose', '-v', action='store_true',
+                              help='Print detailed information')
+    train_parser.add_argument('--binary-arg', dest='extra_args', action='append', default=[],
+                              help='Additional argument passed to the multibinit binary. Repeat for multiple arguments.')
+
+    train_python_parser = subparsers.add_parser(
+        'train-python',
+        help='Fit a MULTIBINIT XML model using pure Python',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='Fit XML coefficient values from DDB, HIST, and basis XML without invoking multibinit.',
+    )
+    train_python_parser.add_argument('ddb', type=str, help='Input DDB file')
+    train_python_parser.add_argument('hist', type=str, help='Input HIST.nc file')
+    train_python_parser.add_argument('basis_xml_pos', type=str, nargs='?', help='Input coefficient basis XML file')
+    train_python_parser.add_argument('--basis-xml', dest='basis_xml_opt', type=str, default=None, help='Input coefficient basis XML file')
+    train_python_parser.add_argument('--output-xml', type=str, default='fit_coeffs.xml', help='Output fitted coefficient XML file')
+    train_python_parser.add_argument('--diagnostics-json', type=str, default='fit_diagnostics.json', help='Output diagnostics JSON file')
+    train_python_parser.add_argument('--ncell', type=int, nargs=3, default=(1, 1, 1), metavar=('NX', 'NY', 'NZ'), help='Supercell dimensions used by HIST frames')
+    train_python_parser.add_argument('--selection', choices=('all', 'greedy'), default='all', help='Coefficient selection mode')
+    train_python_parser.add_argument('--ncoeff', type=int, default=None, help='Number of coefficients for greedy selection')
+    train_python_parser.add_argument('--regularization', type=float, default=0.0, help='Ridge regularization strength')
+    train_python_parser.add_argument('--verbose', '-v', action='store_true', help='Print detailed information')
     
     # Parse arguments
     args = parser.parse_args()
@@ -349,6 +568,72 @@ Examples:
             args.nx, args.ny, args.nz,
             format=args.format,
             verbose=args.verbose
+        )
+
+    elif args.command == 'ddb-to-phonopy':
+        if not Path(args.ddb).exists():
+            print(f"Error: DDB file not found: {args.ddb}", file=sys.stderr)
+            return 1
+        if args.supercell and any(value <= 0 for value in args.supercell):
+            print("Error: --supercell values must be positive integers", file=sys.stderr)
+            return 1
+        export_supercell = None if args.supercell is None else (args.supercell[0], args.supercell[1], args.supercell[2])
+        return ddb_to_phonopy(
+            ddb=args.ddb,
+            output_dir=args.output_dir,
+            supercell=export_supercell,
+            overwrite=not args.no_overwrite,
+            verbose=args.verbose,
+        )
+
+    elif args.command == 'train':
+        if not Path(args.ddb).exists():
+            print(f"Error: DDB file not found: {args.ddb}", file=sys.stderr)
+            return 1
+        if not Path(args.hist).exists():
+            print(f"Error: HIST file not found: {args.hist}", file=sys.stderr)
+            return 1
+        if args.config and not Path(args.config).exists():
+            print(f"Error: Config file not found: {args.config}", file=sys.stderr)
+            return 1
+        return train_model(
+            ddb=args.ddb,
+            hist=args.hist,
+            config=args.config,
+            output_dir=args.output_dir,
+            executable=args.executable,
+            extra_args=args.extra_args,
+            verbose=args.verbose,
+        )
+
+    elif args.command == 'train-python':
+        basis_xml = args.basis_xml_opt or args.basis_xml_pos
+        if basis_xml is None:
+            print("Error: Basis XML file required as positional argument or --basis-xml", file=sys.stderr)
+            return 1
+        if not Path(args.ddb).exists():
+            print(f"Error: DDB file not found: {args.ddb}", file=sys.stderr)
+            return 1
+        if not Path(args.hist).exists():
+            print(f"Error: HIST file not found: {args.hist}", file=sys.stderr)
+            return 1
+        if not Path(basis_xml).exists():
+            print(f"Error: Basis XML file not found: {basis_xml}", file=sys.stderr)
+            return 1
+        if any(value <= 0 for value in args.ncell):
+            print("Error: --ncell values must be positive integers", file=sys.stderr)
+            return 1
+        return train_model_python(
+            ddb=args.ddb,
+            hist=args.hist,
+            basis_xml=basis_xml,
+            output_xml=args.output_xml,
+            diagnostics_json=args.diagnostics_json,
+            ncell=(args.ncell[0], args.ncell[1], args.ncell[2]),
+            selection=args.selection,
+            ncoeff=args.ncoeff,
+            regularization=args.regularization,
+            verbose=args.verbose,
         )
     
     else:

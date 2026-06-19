@@ -79,9 +79,8 @@ def get_reciprocal_symmetry(symrel: np.ndarray) -> np.ndarray:
     """
     Compute reciprocal space symmetry matrices from real space matrices.
     
-    symrec = inverse(symrel)^T
-    
-    For orthogonal integer matrices, symrec = symrel.
+    In this module, q-points are column vectors, so the reciprocal-space
+    operation is the inverse of the real-space operation.
     
     Parameters
     ----------
@@ -101,9 +100,8 @@ def get_reciprocal_symmetry(symrel: np.ndarray) -> np.ndarray:
     symrec = np.zeros_like(symrel, dtype=float)
     
     for isym in range(nsym):
-        # symrec = inverse(symrel)^T
-        # For integer matrices with det = ±1, this gives integer result
-        symrec[isym] = np.linalg.inv(symrel[isym]).T
+        # For integer matrices with det = ±1, this gives integer result.
+        symrec[isym] = np.linalg.inv(symrel[isym])
     
     # Round to integers if close
     symrec_int = np.round(symrec).astype(int)
@@ -427,13 +425,13 @@ def check_q_symmetry(
     q_sym = symrec @ q_ref
     diff = q - q_sym
     diff = diff - np.round(diff)  # Wrap to [-0.5, 0.5)
-    is_direct = np.max(np.abs(diff)) < tol
+    is_direct = bool(np.max(np.abs(diff)) < tol)
     
     # Check with time reversal: q = -symrec @ q_ref
     q_sym_tr = -q_sym
     diff_tr = q - q_sym_tr
     diff_tr = diff_tr - np.round(diff_tr)
-    is_inverse = np.max(np.abs(diff_tr)) < tol
+    is_inverse = bool(np.max(np.abs(diff_tr)) < tol)
     
     return is_direct, is_inverse
 

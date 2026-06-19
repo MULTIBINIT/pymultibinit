@@ -81,6 +81,25 @@ def read_coefficient_xml(filename: str) -> List[PolynomialCoefficient]:
     >>> print(f"Read {len(coeffs)} coefficients")
     >>> print(f"First coefficient: {coeffs[0].value:.6e}")
     """
+    filename_str = str(filename)
+    if filename_str.endswith('.nc'):
+        from pymultibinit.training import read_basis_netcdf
+        basis = read_basis_netcdf(filename)
+        coefficients = []
+        for item in basis:
+            coeff = PolynomialCoefficient(number=item.number, value=item.value, text=item.text)
+            for term in item.terms:
+                poly_term = PolynomialTerm(weight=float(term["weight"]))
+                poly_term.displacements = [
+                    {k: (list(v) if k in ("cell_a", "cell_b") else v)
+                     for k, v in disp.items()}
+                    for disp in term["displacements"]
+                ]
+                poly_term.strains = [dict(s) for s in term.get("strains", ())]
+                coeff.terms.append(poly_term)
+            coefficients.append(coeff)
+        return coefficients
+
     tree = ET.parse(filename)
     root = tree.getroot()
     

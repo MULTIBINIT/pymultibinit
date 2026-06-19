@@ -10,6 +10,7 @@ identical behavior.
 import sys
 import os
 import numpy as np
+import pytest
 
 # Add pymultibinit to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -43,7 +44,7 @@ except Exception as e:
     print(f"✗ Failed to load library with CFFI: {e}")
     import traceback
     traceback.print_exc()
-    sys.exit(1)
+    pytest.skip(f"CFFI libabinit is not loadable in this environment: {e}", allow_module_level=True)
 
 # Compare with ctypes wrapper
 print("\nComparing CFFI vs ctypes wrapper...")

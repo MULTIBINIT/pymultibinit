@@ -74,6 +74,7 @@ class UnitcellData:
     blocks: Optional[List] = None                 # Raw parsed DDB blocks
     ngqpt: Optional[np.ndarray] = None            # (3,) q-point grid dimensions
     symrel: Optional[np.ndarray] = None           # (nsym, 3, 3) symmetry operations (integer)
+    tnons: Optional[np.ndarray] = None            # (nsym, 3) fractional symmetry translations
     nqshft: int = 1                               # Number of q-grid shifts
     q1shft: Optional[np.ndarray] = None           # (nqshft, 3) q-grid shifts
     atom_mapping: Optional[np.ndarray] = None      # (natom, nsym, 4) if computed

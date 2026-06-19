@@ -35,14 +35,15 @@ class MultibinitWrapperCFFI:
         Args:
             lib_path: Path to libabinit.so/dylib. If None, searches in standard locations.
         """
-        if lib_path is None:
-            lib_path = self._find_library()
-        
         self.ffi = FFI()
         self._setup_cdefs()
-        self.lib = self.ffi.dlopen(lib_path)
         self.handle = self.ffi.new("void**")
         self.handle[0] = self.ffi.NULL
+
+        if lib_path is None:
+            lib_path = self._find_library()
+
+        self.lib = self.ffi.dlopen(lib_path)
     
     def _find_library(self) -> str:
         """
@@ -453,6 +454,8 @@ class MultibinitWrapperCFFI:
     
     def free(self):
         """Free the underlying potential structure."""
+        if not hasattr(self, "handle") or not hasattr(self, "ffi"):
+            return
         if self.handle[0] != self.ffi.NULL:
             status = self.ffi.new("int*")
             self.lib.mb_free_potential(self.handle[0], status)

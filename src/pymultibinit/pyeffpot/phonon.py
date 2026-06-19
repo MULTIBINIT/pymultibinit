@@ -6,39 +6,58 @@ from real-space interatomic force constants (IFCs) and unit cell data.
 """
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import Optional, List, Tuple, Union
-from .datastructures import UnitcellData, CrystalInfo, IFCData
-from .supercell_builder import _generate_full_bz_qpoints, _expand_dynmat_to_full_bz, build_supercell
+from typing import Optional, List
+from .datastructures import UnitcellData, IFCData
 
 # Physical constants (atomic units)
-AMU_EMASS = 1822.888486192  # 1 amu in electron masses (matches ABINIT)
+AMU_EMASS = 1822.888484264545  # 1 amu in electron masses (matches ABINIT tests)
 HA_CMM1 = 219474.6313705  # Hartree to cm⁻¹ conversion
 
 
-def build_unitcell_ifcs(u: UnitcellData, eta: float = 0.1) -> IFCData:
+def reduced_to_cartesian(dynmat_reduced: np.ndarray, acell: float) -> np.ndarray:
+    """Convert reduced-coordinate dynamical matrix elements to Cartesian units."""
+    return np.asarray(dynmat_reduced, dtype=float) * (float(acell) ** 2 / 2.0)
+
+
+def calculate_phonon_frequencies(dynmat: np.ndarray, amu: np.ndarray, typat: np.ndarray, acell: float) -> np.ndarray:
+    """Compatibility wrapper used by legacy phonon tests."""
+    from .datastructures import CrystalInfo, UnitcellData
+
+    dynmat_cart = reduced_to_cartesian(dynmat, acell)
+    natom = dynmat_cart.shape[0]
+    crystal = CrystalInfo(
+        natom=natom,
+        ntypat=len(amu),
+        rprimd=np.eye(3) * acell,
+        xred=np.zeros((natom, 3)),
+        xcart=np.zeros((natom, 3)),
+        typat=np.asarray(typat, dtype=int),
+        amu=np.asarray(amu, dtype=float),
+        znucl=np.zeros(len(amu), dtype=int),
+    )
+    unitcell = UnitcellData(crystal=crystal, energy=0.0)
+    return get_frequencies(dynmat_cart, unitcell)
+
+
+def build_unitcell_ifcs(
+    u: UnitcellData,
+    eta: float = 0.1,
+    dipdip: bool = True,
+    asr: bool = False,
+) -> IFCData:
     """
     Compute real-space IFCs for the unit cell from DDB q-points.
     Uses the full pyeffpot methodology: expansion, phase shift, and FT.
     """
     from .supercell_builder import (
-        _generate_full_bz_qpoints, _expand_dynmat_to_full_bz,
-        _bigbx9_rpoints, _canonical_coordinates, _apply_phase_shift,
-        _ftifc_q2r
+        _bigbx9_rpoints, _canonical_coordinates,
+        _ftifc_q2r, _compute_rpoint_weights, _filter_rpoints_by_weights,
+        _apply_asr_weighted,
     )
     
     # 1. Expand to full BZ grid
     ngqpt = u.ngqpt if u.ngqpt is not None else np.array([4, 4, 4], dtype=int)
     nqshft = u.nqshft if u.nqshft is not None else 1
-    q1shft = u.q1shft if u.q1shft is not None else np.zeros((1, 3))
-    qbz = _generate_full_bz_qpoints(ngqpt, nqshft, q1shft)
-    
-    symrel = u.symrel if u.symrel is not None else np.eye(3).reshape(1, 3, 3)
-    tnons = getattr(u, 'tnons', np.zeros((len(symrel), 3)))
-    dynmats_bz = _expand_dynmat_to_full_bz(
-        u.qpoints, u.dynmat, qbz, symrel,
-        u.rprimd, u.xred, tnons
-    )
-    
     from .symmetry import find_symmetry_for_qpoint, rotate_dynamical_matrix_full, build_atom_mapping
     from .dipdip import compute_dipdip_dynmat
     
@@ -113,7 +132,7 @@ def build_unitcell_ifcs(u: UnitcellData, eta: float = 0.1) -> IFCData:
             print(f"  Separating DipDip for q {iq+1}/{nqbz}...")
         
         # 1. Compute DipDip in Convention 1
-        dm_dip = compute_dipdip_dynmat(q, u, eta=eta)
+        dm_dip = compute_dipdip_dynmat(q, u, eta=eta) if dipdip else 0.0
         
         # Short range in Physical space (C1)
         dm_tot = dynmats_total_complex[iq]
@@ -125,24 +144,25 @@ def build_unitcell_ifcs(u: UnitcellData, eta: float = 0.1) -> IFCData:
         dynmats_short_shifted[iq] = dm_sr_c1 * phase_shift[:, np.newaxis, :, np.newaxis]
 
     # 4. FT: q -> R (Generates short-range IFCs)
-    nx, ny, nz = map(int, ngqpt)
-    rpoints = []
-    for i in range(nx):
-        for j in range(ny):
-            for k in range(nz):
-                rpoints.append([i if i <= nx//2 else i-nx, 
-                                j if j <= ny//2 else j-ny, 
-                                k if k <= nz//2 else k-nz])
-    cell_rpt = np.array(rpoints, dtype=int).T # Shape: (3, 64)
+    # Use ABINIT's bigbox R-point set plus Wigner-Seitz weights. A compact
+    # 0..N-1 grid reproduces the input q-grid, but gives incorrect Fourier
+    # interpolation between grid points for multi-atom cells.
+    cell_rpt = _bigbx9_rpoints(ngqpt, nqshft)
     nrpt = cell_rpt.shape[1]
+
     # 5. Inverse Fourier Transform to Real Space (Pure Lattice)
     # dynmats_short_shifted is now periodic on the lattice.
     atmfrc_short = _ftifc_q2r(
         dynmats_short_shifted, qbz, gprim, cell_rpt
     )
-    
-    # [ASR Correction Disabled for Testing]
-    r0_idx = -1
+
+    wghatm = _compute_rpoint_weights(cell_rpt, u.crystal.rprimd, rcan, ngqpt, nqbz)
+    cell_rpt, atmfrc_short, wghatm = _filter_rpoints_by_weights(
+        wghatm, cell_rpt, atmfrc_short
+    )
+    nrpt = cell_rpt.shape[1]
+    if asr:
+        atmfrc_short = _apply_asr_weighted(atmfrc_short, cell_rpt, wghatm)
     
     # Save the background for reconstructor
     ifc_data = IFCData(
@@ -150,10 +170,12 @@ def build_unitcell_ifcs(u: UnitcellData, eta: float = 0.1) -> IFCData:
         cell=cell_rpt,
         atmfrc=atmfrc_short, # For total ifcs, we can't easily define them here
         short_atmfrc=atmfrc_short,
-        ewald_atmfrc=None
+        ewald_atmfrc=None,
+        wghatm=wghatm,
     )
     # Attach background correction metadata
     setattr(ifc_data, 'dm_dip0_sum', dm_dip0_sum)
+    setattr(ifc_data, 'dipdip', bool(dipdip))
     
     return ifc_data
 
@@ -193,7 +215,11 @@ def compute_dynamical_matrix(
     for ir in range(u.ifcs.nrpt):
         R = cell[:, ir]
         phase = np.exp(2j * np.pi * np.dot(R, q))
-        dm_short_shifted += atmfrc_short[:, :, :, :, ir] * phase
+        if u.ifcs.wghatm is not None:
+            weight = u.ifcs.wghatm[:, np.newaxis, :, np.newaxis, ir]
+        else:
+            weight = 1.0
+        dm_short_shifted += atmfrc_short[:, :, :, :, ir] * weight * phase
 
     # 2. Shift back to Convention 1 (Physical)
     # D_c1 = D_c2 * exp(i 2pi q . (tau_b - tau_a))
@@ -206,7 +232,10 @@ def compute_dynamical_matrix(
     # 3. Add Dipole-Dipole back (Convention 1)
     # We just add the full DipDip dynamical matrix.
     # The ASR was satisfied at q=0 during short-range extraction.
-    dm_dip = compute_dipdip_dynmat(q, u, eta=eta)
+    if bool(getattr(u.ifcs, 'dipdip', True)):
+        dm_dip = compute_dipdip_dynmat(q, u, eta=eta)
+    else:
+        dm_dip = 0.0
     
     # No dm_dip0_sum subtraction here! 
     # The background is already contained in dm_short_c1.

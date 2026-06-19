@@ -63,6 +63,12 @@ def _generate_supercell_rpoints(ncell: Tuple[int, int, int]) -> np.ndarray:
     return np.array(rpoints, dtype=int).T  # Shape: (3, nrpt)
 
 
+def _supercell_atom_index(atom_uc: int, ix: int, iy: int, iz: int, ncell: Tuple[int, int, int], natom_uc: int) -> int:
+    """Return atom index for the geometry order ix -> iy -> iz -> atom."""
+    _, ny, nz = ncell
+    return int(atom_uc) + int(natom_uc) * (int(iz) + nz * (int(iy) + ny * int(ix)))
+
+
 def _bigbx9_rpoints(ngqpt: np.ndarray, nqshft: int = 1) -> np.ndarray:
     """
     Generate R-point grid using ABINIT bigbx9 algorithm (brav=1, simple cubic).
@@ -617,7 +623,9 @@ def _compute_dipdip_per_rpoint(
 def _build_supercell_ifcs_fourier(
     unitcell: UnitcellData,
     crystal_sc: CrystalInfo,
-    ncell: Tuple[int, int, int]
+    ncell: Tuple[int, int, int],
+    dipdip: bool = True,
+    asr: bool = True,
 ) -> IFCData:
     """
     Build supercell IFCs using Fourier transform from q-points.
@@ -696,11 +704,11 @@ def _build_supercell_ifcs_fourier(
     # Step 4: Subtract ewald from total dynmat in q-space (Fortran ifc_init)
     # This must happen BEFORE phase shift and FT, matching Fortran exactly.
     ewald_atmfrc_uc = None
-    if unitcell.epsilon_inf is not None and unitcell.zeff is not None:
+    if dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
         if np.linalg.norm(unitcell.zeff) > 1e-10:
-            from .dipdip import compute_dipdip_dynmat
-            for iq in range(nqbz):
-                ewald_q = compute_dipdip_dynmat(qbz[iq], unitcell, sumg0=0)
+            from .dipdip import compute_dipdip_dynmats
+            ewald_qpoints = compute_dipdip_dynmats(qbz, unitcell, sumg0=0)
+            for iq, ewald_q in enumerate(ewald_qpoints):
                 dynmat_bz[iq, ..., 0] -= np.real(ewald_q)
                 dynmat_bz[iq, ..., 1] -= np.imag(ewald_q)
 
@@ -739,7 +747,13 @@ def _build_supercell_ifcs_fourier(
     short_atmfrc_uc = total_atmfrc_uc
 
     # Step 10: Apply weighted ASR to short-range (asrif9 with asr=1)
-    short_atmfrc_uc = _apply_asr_weighted(short_atmfrc_uc, cell_rpt, wghatm)
+    if asr:
+        short_atmfrc_uc = _apply_asr_weighted(short_atmfrc_uc, cell_rpt, wghatm)
+
+    # Wigner-Seitz boundary R-points are fractional images of the same IFC.
+    # ABINIT applies wghatm whenever reconstructing D(q); the supercell force
+    # evaluator has no separate weight array, so fold the weighted IFCs.
+    short_atmfrc_uc_weighted = short_atmfrc_uc * wghatm[:, np.newaxis, :, np.newaxis, :]
 
     # --- Phase 2: generateDipDip (m_effective_potential.F90 lines 634-1176) ---
     # Map short-range to union R-point grid, combine with ewald, apply
@@ -776,11 +790,11 @@ def _build_supercell_ifcs_fourier(
         key = (int(r[0]), int(r[1]), int(r[2]))
         if key in uc_rpt_lookup:
             irpt_uc = uc_rpt_lookup[key]
-            short_atmfrc_union[:, :, :, :, irpt_u] = short_atmfrc_uc[:, :, :, :, irpt_uc]
+            short_atmfrc_union[:, :, :, :, irpt_u] = short_atmfrc_uc_weighted[:, :, :, :, irpt_uc]
 
     # Step 13: Ewald for union R-points (supercell geometry)
     ewald_atmfrc_union = np.zeros((natom_uc, 3, natom_uc, 3, nrpt_union))
-    if unitcell.epsilon_inf is not None and unitcell.zeff is not None:
+    if dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
         if np.linalg.norm(unitcell.zeff) > 1e-10:
             ewald_atmfrc_union = _compute_dipdip_per_rpoint(
                 unitcell, cell_union, crystal_sc.rprimd
@@ -791,21 +805,22 @@ def _build_supercell_ifcs_fourier(
 
     # Step 15: Unweighted ASR (m_harmonics_terms.F90 lines 724-820)
     # sum_{ib, irpt} atmfrc[ia, mu, ib, nu, irpt]; subtract from R=0 diagonal
-    izero_union = None
-    for irpt_u in range(nrpt_union):
-        if np.all(np.abs(cell_union[:, irpt_u]) < 1e-10):
-            izero_union = irpt_u
-            break
+    if asr:
+        izero_union = None
+        for irpt_u in range(nrpt_union):
+            if np.all(np.abs(cell_union[:, irpt_u]) < 1e-10):
+                izero_union = irpt_u
+                break
 
-    if izero_union is not None:
-        for mu in range(3):
-            for nu in range(3):
-                for ia in range(natom_uc):
-                    s = 0.0
-                    for ib in range(natom_uc):
-                        for irpt_u in range(nrpt_union):
-                            s += atmfrc_union[ia, mu, ib, nu, irpt_u]
-                    atmfrc_union[ia, mu, ia, nu, izero_union] -= s
+        if izero_union is not None:
+            for mu in range(3):
+                for nu in range(3):
+                    for ia in range(natom_uc):
+                        s = 0.0
+                        for ib in range(natom_uc):
+                            for irpt_u in range(nrpt_union):
+                                s += atmfrc_union[ia, mu, ib, nu, irpt_u]
+                        atmfrc_union[ia, mu, ia, nu, izero_union] -= s
 
     # Step 16: Replicate to supercell (fold union R-points into supercell grid)
     nx, ny, nz = ncell
@@ -847,11 +862,11 @@ def _build_supercell_ifcs_fourier(
                 for ix in range(nx):
                     for iy in range(ny):
                         for iz in range(nz):
-                            i_sc = i_uc + natom_uc * (ix + nx * (iy + ny * iz))
+                            i_sc = _supercell_atom_index(i_uc, ix, iy, iz, ncell, natom_uc)
                             jx = (ix + r1) % nx
                             jy = (iy + r2) % ny
                             jz = (iz + r3) % nz
-                            j_sc = j_uc + natom_uc * (jx + nx * (jy + ny * jz))
+                            j_sc = _supercell_atom_index(j_uc, jx, jy, jz, ncell, natom_uc)
 
                             atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += ifc_u
                             short_atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += short_u
@@ -867,7 +882,12 @@ def _build_supercell_ifcs_fourier(
     )
 
 
-def build_supercell(unitcell: UnitcellData, ncell: Tuple[int, int, int]) -> SupercellPotential:
+def build_supercell(
+    unitcell: UnitcellData,
+    ncell: Tuple[int, int, int],
+    dipdip: bool = True,
+    asr: bool = True,
+) -> SupercellPotential:
     """
     Build supercell potential from unitcell data.
     
@@ -877,6 +897,10 @@ def build_supercell(unitcell: UnitcellData, ncell: Tuple[int, int, int]) -> Supe
         Primitive cell data (from DDB/XML)
     ncell : Tuple[int, int, int]
         Supercell dimensions (nx, ny, nz)
+    dipdip : bool
+        Whether to recompute/add dipole-dipole IFCs when Born charges are available.
+    asr : bool
+        Whether to enforce the acoustic sum rule when building IFCs.
         
     Returns
     -------
@@ -896,16 +920,19 @@ def build_supercell(unitcell: UnitcellData, ncell: Tuple[int, int, int]) -> Supe
     # Step 2: Build supercell IFCs
     if unitcell.qpoints is not None and unitcell.dynmat is not None:
         # Use full q→R Fourier transform (ABINIT-style)
-        ifcs_sc = _build_supercell_ifcs_fourier(unitcell, crystal_sc, ncell)
+        ifcs_sc = _build_supercell_ifcs_fourier(
+            unitcell, crystal_sc, ncell, dipdip=dipdip, asr=asr
+        )
     else:
         if unitcell.ifcs is None:
             raise ValueError("Unitcell IFCs not available")
         ifcs_sc = _replicate_ifcs(unitcell.ifcs, unitcell.crystal, crystal_sc, ncell)
         
-        if unitcell.epsilon_inf is not None and unitcell.zeff is not None:
+        if dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
             _compute_dipole_dipole(ifcs_sc, unitcell, crystal_sc, ncell)
         
-        _apply_asr(ifcs_sc)
+        if asr:
+            _apply_asr(ifcs_sc)
     
     supercell = SupercellPotential(
         unitcell=unitcell,
@@ -982,6 +1009,9 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
     natom_uc = crystal_uc.natom
     natom_sc = crystal_sc.natom
     nrpt_uc = ifcs_uc.nrpt
+    legacy_layout = ifcs_uc.short_atmfrc.shape[0] == 3 and ifcs_uc.short_atmfrc.shape[2] == 3
+    short_uc = np.transpose(ifcs_uc.short_atmfrc, (1, 0, 3, 2, 4)) if legacy_layout else ifcs_uc.short_atmfrc
+    atm_uc = np.transpose(ifcs_uc.atmfrc, (1, 0, 3, 2, 4)) if legacy_layout else ifcs_uc.atmfrc
     
     nrpt_sc = nrpt_uc
     atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_uc))
@@ -992,19 +1022,23 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
         cell_shift = ifcs_uc.cell[:, irpt] if ifcs_uc.cell.ndim == 2 else np.zeros(3, dtype=int)
         for i_uc in range(natom_uc):
             for j_uc in range(natom_uc):
-                ifc_uc = ifcs_uc.short_atmfrc[i_uc, :, j_uc, :, irpt]
+                short_ifc_uc = short_uc[i_uc, :, j_uc, :, irpt]
+                atm_ifc_uc = atm_uc[i_uc, :, j_uc, :, irpt]
                 
                 for ix in range(nx):
                     for iy in range(ny):
                         for iz in range(nz):
-                            i_sc = i_uc + natom_uc * (ix + nx * (iy + ny * iz))
+                            i_sc = _supercell_atom_index(i_uc, ix, iy, iz, ncell, natom_uc)
                             jx = (ix + int(cell_shift[0])) % nx
                             jy = (iy + int(cell_shift[1])) % ny
                             jz = (iz + int(cell_shift[2])) % nz
-                            j_sc = j_uc + natom_uc * (jx + nx * (jy + ny * jz))
+                            j_sc = _supercell_atom_index(j_uc, jx, jy, jz, ncell, natom_uc)
                             
-                            short_atmfrc_sc[i_sc, :, j_sc, :, irpt] = ifc_uc
-                            atmfrc_sc[i_sc, :, j_sc, :, irpt] = ifc_uc
+                            short_atmfrc_sc[i_sc, :, j_sc, :, irpt] = short_ifc_uc
+                            atmfrc_sc[i_sc, :, j_sc, :, irpt] = atm_ifc_uc
+    if legacy_layout:
+        atmfrc_sc = np.transpose(atmfrc_sc, (1, 0, 3, 2, 4))
+        short_atmfrc_sc = np.transpose(short_atmfrc_sc, (1, 0, 3, 2, 4))
     
     return IFCData(
         nrpt=nrpt_sc,
@@ -1052,15 +1086,23 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
 
 def _apply_asr(ifcs_sc: IFCData):
     """Apply Acoustic Sum Rule correction to IFCs."""
-    natom = ifcs_sc.atmfrc.shape[1]
-    
+    legacy_layout = ifcs_sc.atmfrc.shape[0] == 3 and ifcs_sc.atmfrc.shape[2] == 3
+    natom = ifcs_sc.atmfrc.shape[1] if legacy_layout else ifcs_sc.atmfrc.shape[0]
+
     for irpt in range(ifcs_sc.nrpt):
         for i in range(natom):
             for mu in range(3):
+                if legacy_layout:
+                    sum_ifc = np.sum(ifcs_sc.atmfrc[mu, i, :, :, irpt])
+                    correction = sum_ifc / (3 * natom)
+                    ifcs_sc.atmfrc[mu, i, :, :, irpt] -= correction
+                    ifcs_sc.short_atmfrc[mu, i, :, :, irpt] -= correction
+                    continue
+
                 sum_ifc = np.sum(ifcs_sc.atmfrc[i, mu, :, :, irpt])
                 correction = sum_ifc / (3 * natom)
                 ifcs_sc.atmfrc[i, mu, :, :, irpt] -= correction
-                ifcs_sc.short_atmfrc[mu, i, :, :, irpt] -= correction
+                ifcs_sc.short_atmfrc[i, mu, :, :, irpt] -= correction
 
 
 def set_anharmonic_coeffs(supercell: SupercellPotential, coeffs: List):

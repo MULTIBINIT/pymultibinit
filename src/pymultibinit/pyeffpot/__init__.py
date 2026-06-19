@@ -20,7 +20,7 @@ Example:
     >>> from pymultibinit.pyeffpot.supercell_builder import build_supercell
     >>> 
     >>> # Load unitcell from DDB
-    >>> unitcell = read_ddb("BaTiO3.DDB")
+    >>> unitcell = read_ddb("BaHfO3.DDB")
     >>> 
     >>> # Load anharmonic coefficients from XML
     >>> coeffs = read_coefficient_xml("coeffs.xml")
@@ -34,6 +34,7 @@ __version__ = "0.1.0"
 # Import main functions for convenience
 from .ddb_parser_complete import read_ddb, UnitcellData
 from .ddb_writer import write_ddb
+from .phonopy_export import PhonopyDdbExportResult, write_phonopy_from_ddb
 from .xml_parser import read_coefficient_xml, write_coefficient_xml
 from .supercell_builder import build_supercell, set_anharmonic_coeffs
 from .datastructures import CrystalInfo, IFCData, SupercellPotential
@@ -45,6 +46,8 @@ __all__ = [
     'read_ddb',
     'write_ddb',
     'UnitcellData',
+    'PhonopyDdbExportResult',
+    'write_phonopy_from_ddb',
     
     # XML I/O
     'read_coefficient_xml',
