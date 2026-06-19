@@ -9,14 +9,12 @@ Supports two backends:
 - 'pyeffpot': Pure Python implementation (no Fortran dependency)
 """
 import numpy as np
-from typing import Optional, Tuple, Literal, Union
+from typing import Optional, Tuple, Literal, List, Protocol
 import warnings
 from .atom_matching import (
     find_atom_mapping_pbc,
     apply_mapping_to_positions,
     apply_inverse_mapping_to_forces,
-    validate_mapping,
-    get_reference_structure_info
 )
 
 # Unit conversion constants
@@ -24,6 +22,17 @@ BOHR_TO_ANGSTROM = 0.529177210903
 ANGSTROM_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM
 HARTREE_TO_EV = 27.211386245988
 EV_TO_HARTREE = 1.0 / HARTREE_TO_EV
+
+
+class _EffectivePotentialProtocol(Protocol):
+    _reference_positions: np.ndarray
+    _reference_lattice: np.ndarray
+
+    def set_reference_stress(self, stress: np.ndarray) -> None:
+        ...
+
+    def evaluate(self, xcart: np.ndarray, rprimd: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
+        ...
 
 
 class MultibinitPotential:
@@ -66,19 +75,14 @@ class MultibinitPotential:
             backend: 'cffi' for Fortran wrapper, 'pyeffpot' for pure Python
         """
         self.backend = backend
-        self._pyeffpot_potential = None  # For pyeffpot backend
+        self._pyeffpot_potential: Optional[_EffectivePotentialProtocol] = None  # For pyeffpot backend
+        self._lib_path = lib_path
+        self.wrapper = None
+        self._use_atomic_units = bool(use_atomic_units)
         
-        if backend == 'cffi':
-            from .wrapper_cffi import MultibinitWrapperCFFI
-            self.wrapper = MultibinitWrapperCFFI(lib_path=lib_path)
-        else:
-            self.wrapper = None
-        
-        # Always use Angstrom/eV for ASE compatibility
         if use_atomic_units:
             warnings.warn(
-                "use_atomic_units is deprecated and ignored. "
-                "PyMultibinit always uses Angstrom/eV for ASE compatibility.",
+                "use_atomic_units is deprecated. Prefer Angstrom/eV inputs for ASE compatibility.",
                 DeprecationWarning, stacklevel=2
             )
         self._initialized = False
@@ -94,7 +98,20 @@ class MultibinitPotential:
         self._reference_lattice: Optional[np.ndarray] = None  # Reference lattice
         self._mapping_validated = False
         self._is_identity_mapping = False  # Flag to skip force remapping when no reordering needed
+        # Chemical identity metadata for ASE export (Bug fix: was hardcoded to 'X')
+        self._znucl: Optional[np.ndarray] = None        # (ntypat,) atomic number per species
+        self._typat_super: Optional[np.ndarray] = None  # (natom_sc,) species index per supercell atom
+        self._typat_ref: Optional[np.ndarray] = None    # (natom_uc,) species index per unit-cell atom
         self._ncell: Optional[Tuple[int, int, int]] = None  # Supercell dimensions
+
+    def _ensure_cffi_wrapper(self):
+        """Load libabinit only when a CFFI-backed operation needs it."""
+        if self.backend != 'cffi':
+            raise RuntimeError("CFFI wrapper requested for non-CFFI backend")
+        if self.wrapper is None:
+            from .wrapper_cffi import MultibinitWrapperCFFI
+            self.wrapper = MultibinitWrapperCFFI(lib_path=self._lib_path)
+        return self.wrapper
     
     @property
     def natoms(self) -> int:
@@ -145,8 +162,17 @@ class MultibinitPotential:
             Initialized MultibinitPotential instance
         """
         pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
-        pot.wrapper.init_from_abi_file(abi_file)
+        wrapper = pot._ensure_cffi_wrapper()
+        wrapper.init_from_abi_file(abi_file)
         pot._initialized = True
+        
+        # Parse znucl/typat from the DDB referenced in the .abi file
+        try:
+            from .wrapper_cffi import MultibinitWrapperCFFI
+            ddb_path, _, _ = MultibinitWrapperCFFI._parse_abi_file(abi_file)
+            pot._load_znucl_from_ddb(ddb_path)
+        except Exception as e:
+            warnings.warn(f"Could not load znucl metadata from .abi: {e}")
         
         # Automatically get internal supercell reference from C API
         try:
@@ -180,7 +206,8 @@ class MultibinitPotential:
             Initialized MultibinitPotential instance
         """
         pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
-        pot.wrapper.init_from_params(
+        wrapper = pot._ensure_cffi_wrapper()
+        wrapper.init_from_params(
             ddb_file=ddb_file,
             sys_file=sys_file,
             coeff_file=coeff_file,
@@ -189,6 +216,7 @@ class MultibinitPotential:
             dipdip=dipdip
         )
         pot._initialized = True
+        pot._load_znucl_from_ddb(ddb_file)
         
         # Automatically get internal supercell reference from C API
         try:
@@ -201,8 +229,11 @@ class MultibinitPotential:
     @classmethod
     def from_pyeffpot(cls, ddb_file: str, xml_file: Optional[str] = None,
                       ncell: Tuple[int, int, int] = (4, 4, 4),
+                      dipdip: bool = True,
+                      asr: bool = True,
                       auto_match_atoms: bool = True,
-                      match_tolerance: float = 0.1) -> 'MultibinitPotential':
+                      match_tolerance: float = 0.1,
+                      reference_stress_ha_bohr3: Optional[np.ndarray] = None) -> 'MultibinitPotential':
         """
         Create potential using pure Python backend (no Fortran dependency).
         
@@ -231,7 +262,7 @@ class MultibinitPotential:
                   match_tolerance=match_tolerance)
         
         unitcell = read_ddb(ddb_file)
-        supercell = build_supercell(unitcell, ncell)
+        supercell = build_supercell(unitcell, ncell, dipdip=dipdip, asr=asr)
         
         if xml_file:
             from pathlib import Path
@@ -240,6 +271,11 @@ class MultibinitPotential:
                 supercell.anharmonic_coeffs = coeffs
         
         pot._pyeffpot_potential = EffectivePotential(supercell)
+        pot._znucl = np.asarray(unitcell.znucl, dtype=int).copy()
+        pot._typat_ref = np.asarray(unitcell.typat, dtype=int).copy()
+        pot._typat_super = np.asarray(supercell.crystal_sc.typat, dtype=int).copy()
+        if reference_stress_ha_bohr3 is not None:
+            pot._pyeffpot_potential.set_reference_stress(reference_stress_ha_bohr3)
         pot._initialized = True
         
         pot._ncell = ncell
@@ -253,6 +289,27 @@ class MultibinitPotential:
         
         return pot
     
+    def _load_znucl_from_ddb(self, ddb_file: str) -> None:
+        """
+        Parse znucl (atomic numbers per species) and typat from a DDB file
+        using the pure-Python pyeffpot parser. Stored for ASE symbol resolution.
+
+        Failures are non-fatal: a warning is emitted and the fields stay None,
+        causing ASE exports to fall back to 'X' symbols.
+        """
+        try:
+            from .pyeffpot import read_ddb
+            unitcell = read_ddb(ddb_file)
+            self._znucl = np.asarray(unitcell.znucl, dtype=int).copy()
+            self._typat_ref = np.asarray(unitcell.typat, dtype=int).copy()
+        except Exception as e:
+            warnings.warn(
+                f"Could not parse znucl/typat from DDB '{ddb_file}': {e}. "
+                f"ASE exports will use placeholder 'X' symbols.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     def _fetch_internal_supercell_reference(self):
         """
         Fetch the expected supercell structure directly from the C library.
@@ -263,7 +320,8 @@ class MultibinitPotential:
             
         # Get supercell info (in Bohr) from C API
         try:
-            natom_super, species, pos_super_bohr, lat_super_bohr = self.wrapper.get_supercell_structure()
+            wrapper = self._ensure_cffi_wrapper()
+            natom_super, species, pos_super_bohr, lat_super_bohr = wrapper.get_supercell_structure()
         except RuntimeError:
             # Might happen if initialization failed or data not ready
             return
@@ -275,6 +333,7 @@ class MultibinitPotential:
         # Convert to Angstrom
         pos_super = pos_super_bohr * BOHR_TO_ANGSTROM
         lat_super = lat_super_bohr * BOHR_TO_ANGSTROM
+        self._typat_super = np.asarray(species, dtype=int).copy()
         
         self.set_reference_structure(pos_super, lat_super)
     
@@ -322,6 +381,8 @@ class MultibinitPotential:
         
         # Determine initialization mode
         if config.is_abi_mode():
+            if config.abi_file is None:
+                raise ValueError("abi_file is required for ABI mode")
             # Use .abi file
             pot = cls.from_abi(
                 abi_file=config.abi_file,
@@ -329,10 +390,12 @@ class MultibinitPotential:
                 use_atomic_units=config.use_atomic_units
             )
         else:
+            if config.ddb_file is None:
+                raise ValueError("ddb_file is required for parameter mode")
             # Use parameters
             pot = cls.from_params(
                 ddb_file=config.ddb_file,
-                sys_file=config.sys_file,
+                sys_file=config.sys_file or "",
                 coeff_file=config.coeff_file,
                 ncell=config.ncell,
                 ngqpt=config.ngqpt,
@@ -358,8 +421,13 @@ class MultibinitPotential:
             positions: Reference atomic positions, shape (natom, 3)
             lattice: Reference lattice vectors, shape (3, 3)
         """
-        self._reference_positions = np.array(positions, dtype=np.float64)
-        self._reference_lattice = np.array(lattice, dtype=np.float64)
+        positions_array = np.array(positions, dtype=np.float64)
+        lattice_array = np.array(lattice, dtype=np.float64)
+        if self._use_atomic_units:
+            positions_array = positions_array * BOHR_TO_ANGSTROM
+            lattice_array = lattice_array * BOHR_TO_ANGSTROM
+        self._reference_positions = positions_array
+        self._reference_lattice = lattice_array
         self._mapping_validated = False
         
         # Clear any existing mapping
@@ -540,8 +608,8 @@ class MultibinitPotential:
                     stress_ha_bohr3[0, 1],
                 ])
         else:
-            assert self.wrapper is not None
-            energy_ha, forces_ha_bohr, stress_ha_bohr3 = self.wrapper.evaluate(pos_bohr, lat_bohr)
+            wrapper = self._ensure_cffi_wrapper()
+            energy_ha, forces_ha_bohr, stress_ha_bohr3 = wrapper.evaluate(pos_bohr, lat_bohr)
         
         # Map forces back to input order if needed
         # Skip if identity mapping (optimization)
@@ -570,16 +638,25 @@ class MultibinitPotential:
                 
         Notes:
             - If auto_match_atoms=True, the first evaluate() call sets the reference
-            - Atomic numbers are not available from C API, returns None
+            - Atomic numbers are resolved from DDB metadata when available, otherwise None
             - Call this after at least one evaluate() if using automatic reference
         """
         if self._reference_positions is None or self._reference_lattice is None:
             return None
         
+        atomic_numbers: Optional[np.ndarray] = None
+        if self._typat_super is not None and self._znucl is not None:
+            try:
+                # typat is 1-indexed species number; znucl[typat-1] is the atomic number
+                typat = np.asarray(self._typat_super, dtype=int)
+                atomic_numbers = np.asarray(self._znucl, dtype=int)[typat - 1]
+            except (IndexError, ValueError) as e:
+                warnings.warn(f"Could not resolve atomic numbers from typat/znucl: {e}")
+        
         return (
             self._reference_positions.copy(),
             self._reference_lattice.copy(),
-            None  # Atomic numbers not available from C API
+            None if atomic_numbers is None else atomic_numbers.copy(),
         )
     
     def export_supercell_to_ase(self):
@@ -595,14 +672,13 @@ class MultibinitPotential:
             
         Notes:
             - Positions and cell in Angstrom (ASE convention)
-            - Atomic symbols set to 'X' (unknown) since not available from C API
-            - You can set correct symbols manually: atoms.set_chemical_symbols(symbols)
+            - Atomic symbols are resolved from DDB metadata (typat→znucl→symbol)
+            - If no DDB metadata is available, symbols default to 'X'
             
         Example:
             >>> pot = MultibinitPotential.from_params(...)
             >>> pot.evaluate(positions, lattice)  # Sets reference
             >>> atoms = pot.export_supercell_to_ase()
-            >>> atoms.set_chemical_symbols(['Ba']*8 + ['Ti']*8 + ['O']*24)
             >>> atoms.write('supercell.cif')
         """
         try:
@@ -620,10 +696,15 @@ class MultibinitPotential:
         positions, lattice, atomic_numbers = structure
         
         # Positions and lattice are already in Angstrom (from wrapper or already converted)
-        # Create Atoms with dummy symbols (no atomic info from C API)
         natom = len(positions)
+        if atomic_numbers is not None:
+            from ase.data import chemical_symbols
+            symbols = [chemical_symbols[int(z)] for z in atomic_numbers]
+        else:
+            symbols = ['X'] * natom  # Fallback: no DDB metadata available
+
         atoms = Atoms(
-            symbols=['X'] * natom,
+            symbols=symbols,
             positions=positions,
             cell=lattice,
             pbc=True
@@ -646,14 +727,13 @@ class MultibinitPotential:
             ImportError: If ASE is not installed
             
         Notes:
-            - Atomic symbols will be 'X' (unknown)
-            - Manually edit the file or use export_supercell_to_ase() to set symbols
+            - Atomic symbols are resolved from DDB metadata (typat→znucl→symbol)
+            - If no DDB metadata is available, symbols default to 'X'
             
         Example:
             >>> pot = MultibinitPotential.from_params(...)
             >>> pot.evaluate(positions, lattice)  # Sets reference
             >>> pot.export_supercell_to_file('supercell.cif')
-            >>> # Manually edit supercell.cif to set correct atom types
         """
         atoms = self.export_supercell_to_ase()
         atoms.write(filename, format=format)
@@ -674,8 +754,8 @@ class MultibinitPotential:
             
         Notes:
             - Positions and cell in Angstrom (ASE convention)
-            - Atomic species are provided as integer types (typat)
-            - Symbols are set to element names if possible, otherwise 'X'
+            - Atomic symbols are resolved from DDB metadata (typat→znucl→symbol)
+            - If no DDB metadata is available, symbols default to 'X'
             
         Example:
             >>> pot = MultibinitPotential.from_config_file('config.conf')
@@ -692,20 +772,27 @@ class MultibinitPotential:
             raise RuntimeError("Potential not initialized. Call from_params() or from_config_file() first.")
         
         # Get reference structure from C API
-        natom, species, positions, lattice = self.wrapper.get_reference_structure()
+        wrapper = self._ensure_cffi_wrapper()
+        natom, species, positions, lattice = wrapper.get_reference_structure()
         
         # Convert to Angstrom if needed (C API returns Bohr)
         positions_ang = positions * BOHR_TO_ANGSTROM
         lattice_ang = lattice * BOHR_TO_ANGSTROM
         
-        # Convert typat to symbols
-        # typat is 1-indexed, chemical_symbols is 0-indexed
-        symbols = []
-        for typat in species:
-            if 0 < typat < len(chemical_symbols):
-                symbols.append(chemical_symbols[typat])
-            else:
-                symbols.append('X')  # Unknown element
+        # Convert typat (1-indexed species) → atomic number via znucl → ASE symbol
+        symbols: List[str] = []
+        if self._znucl is not None:
+            znucl_arr = np.asarray(self._znucl, dtype=int)
+            for typat in species:
+                typat_int = int(typat)
+                if 1 <= typat_int <= len(znucl_arr):
+                    z = int(znucl_arr[typat_int - 1])
+                    symbols.append(chemical_symbols[z] if 0 < z < len(chemical_symbols) else 'X')
+                else:
+                    symbols.append('X')
+        else:
+            # No znucl metadata — fall back to 'X' for all atoms
+            symbols = ['X'] * len(species)
         
         # Create Atoms object
         atoms = Atoms(
