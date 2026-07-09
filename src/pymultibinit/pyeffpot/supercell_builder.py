@@ -674,16 +674,20 @@ def _build_supercell_ifcs_fourier(
     
     # Step 2: Expand irreducible dynmat to full BZ (symdm9 equivalent)
     symrel = unitcell.symrel
-    if symrel is None:
+    if unitcell.dynmat is None:
+        raise ValueError("No dynamical matrices in unitcell")
+    if unitcell.qpoints is None:
+        raise ValueError("No q-points in unitcell")
+    qpoints = np.asarray(unitcell.qpoints)
+    qpoint_keys = {tuple(np.round(q, 12)) for q in qpoints}
+    qbz_keys = {tuple(np.round(q, 12)) for q in qbz}
+    if len(qpoints) == nqbz and qpoint_keys == qbz_keys:
+        order = [int(np.argmin(np.linalg.norm(qpoints - q, axis=1))) for q in qbz]
+        dynmat_bz = unitcell.dynmat[order]
+    elif symrel is None:
         # No symmetry: assume qibz == qbz (only works if DDB has full grid)
         dynmat_bz = unitcell.dynmat
-        if dynmat_bz is None:
-            raise ValueError("No dynamical matrices in unitcell")
     else:
-        if unitcell.dynmat is None:
-            raise ValueError("No dynamical matrices in unitcell")
-        if unitcell.qpoints is None:
-            raise ValueError("No q-points in unitcell")
         tnons = getattr(unitcell, 'tnons', None)
         if tnons is None:
             tnons = np.zeros((len(symrel), 3))
@@ -700,11 +704,9 @@ def _build_supercell_ifcs_fourier(
     
     rprimd = unitcell.rprimd
     gprim = 2 * np.pi * np.linalg.inv(rprimd).T
-    
-    # Step 4: Subtract ewald from total dynmat in q-space (Fortran ifc_init)
-    # This must happen BEFORE phase shift and FT, matching Fortran exactly.
-    ewald_atmfrc_uc = None
-    if dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
+    recompute_dipdip = False
+
+    if recompute_dipdip and dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
         if np.linalg.norm(unitcell.zeff) > 1e-10:
             from .dipdip import compute_dipdip_dynmats
             ewald_qpoints = compute_dipdip_dynmats(qbz, unitcell, sumg0=0)
@@ -794,7 +796,7 @@ def _build_supercell_ifcs_fourier(
 
     # Step 13: Ewald for union R-points (supercell geometry)
     ewald_atmfrc_union = np.zeros((natom_uc, 3, natom_uc, 3, nrpt_union))
-    if dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
+    if recompute_dipdip and dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
         if np.linalg.norm(unitcell.zeff) > 1e-10:
             ewald_atmfrc_union = _compute_dipdip_per_rpoint(
                 unitcell, cell_union, crystal_sc.rprimd
