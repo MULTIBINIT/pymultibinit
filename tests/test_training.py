@@ -1241,6 +1241,7 @@ def test_generate_displacement_basis_tiny_structure_is_deterministic_and_readabl
         xcart=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
         cutoff=1.5,
         power_range=(1, 1),
+        include_pure_strain=False,
     )
 
     assert [item.text for item in basis] == ["u0_0_1", "u1_0_1", "u2_0_1"]
@@ -1253,6 +1254,7 @@ def test_fortran_text_labels_match_multibinit_style():
         xcart=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
         cutoff=1.5,
         power_range=(2, 2),
+        include_pure_strain=False,
     )
 
     labeled = with_fortran_text_labels(basis, ["Ti", "O", "O"])
@@ -1267,6 +1269,7 @@ def test_generate_displacement_basis_removes_symmetry_duplicate_orbits():
         cutoff=1.5,
         power_range=(1, 1),
         symrel=[np.eye(3, dtype=int), np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])],
+        include_pure_strain=False,
     )
 
     assert [item.text for item in basis] == ["u0_0_1", "u2_0_1"]
@@ -1278,6 +1281,7 @@ def test_generate_displacement_basis_low_power_keys_are_stable():
         xcart=np.array([[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [2.0, 0.0, 0.0]]),
         cutoff=0.5,
         power_range=(2, 2),
+        include_pure_strain=False,
     )
 
     assert [item.text for item in basis[:3]] == ["u0_0_1^2", "u0_0_1*u1_0_1", "u0_0_1*u2_0_1"]
@@ -1291,6 +1295,7 @@ def test_generate_displacement_basis_can_include_linear_strain_couplings():
         power_range=(3, 4),
         include_strain_coupling=True,
         strain_voigts=(1, 4),
+        include_pure_strain=False,
     )
 
     texts = [item.text for item in basis]
@@ -1310,6 +1315,7 @@ def test_generate_displacement_basis_includes_periodic_same_atom_pairs():
         power_range=(1, 1),
         ncell=(2, 1, 1),
         rprimd=np.eye(3),
+        include_pure_strain=False,
     )
 
     assert any(item.terms[0]["displacements"][0]["cell_b"] == (-1, 0, 0) for item in basis)
@@ -1335,6 +1341,7 @@ def test_generate_displacement_basis_filters_anti_invariant_linear_terms():
         cutoff=1.5,
         power_range=(1, 1),
         symrel=[np.diag([-1, 1, 1])],
+        include_pure_strain=False,
     )
 
     assert "u0_0_1" not in [item.text for item in basis]
@@ -1347,6 +1354,7 @@ def test_generate_displacement_basis_prunes_disconnected_periodic_monomials():
         power_range=(2, 2),
         ncell=(3, 1, 1),
         rprimd=np.eye(3),
+        include_pure_strain=False,
     )
 
     assert all(len({disp["cell_b"] for disp in item.terms[0]["displacements"]}) == 1 for item in basis)

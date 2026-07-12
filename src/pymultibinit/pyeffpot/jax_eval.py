@@ -31,11 +31,13 @@ class CompiledTerms:
     direction: np.ndarray
     power: np.ndarray
     factor_mask: np.ndarray
-    strain_voigt_idx: np.ndarray
-    strain_power: np.ndarray
+    strain_voigt_idx: np.ndarray  # (n, max_strains)
+    strain_power: np.ndarray      # (n, max_strains)
+    strain_mask: np.ndarray       # (n, max_strains)
     natom_sc: int
     ncells: int
     max_factors: int
+    max_strains: int
 
 
 def _supercell_atom_index(atom_uc: int, ix: int, iy: int, iz: int,
@@ -80,17 +82,17 @@ def compile_terms(basis_coeffs: Sequence, ncell: tuple[int, int, int],
             if isinstance(strains, dict):
                 strains = [strains]
 
-            sv = 0
-            sp = 0
+            strain_list = []
             for s in strains:
                 sv = int(s.get("voigt", s.get("voigt_index", 0)))
                 sp = int(s.get("power", 1))
+                if sv > 0 and sp > 0:
+                    strain_list.append((sv, sp))
 
             all_terms.append({
                 "coeff": float(coeff.value) * float(term.weight if hasattr(term, "weight") else term.get("weight", 1.0)),
                 "disps": disps,
-                "strain_voigt": sv,
-                "strain_power": sp,
+                "strains": strain_list,
             })
 
     if not all_terms:
@@ -98,12 +100,15 @@ def compile_terms(basis_coeffs: Sequence, ncell: tuple[int, int, int],
             coeff=np.zeros(0), atom_a=np.zeros((0,1,1),dtype=np.int64),
             atom_b=np.zeros((0,1,1),dtype=np.int64), direction=np.zeros((0,1),dtype=np.int64),
             power=np.zeros((0,1)), factor_mask=np.zeros((0,1)),
-            strain_voigt_idx=np.zeros(0,dtype=np.int64), strain_power=np.zeros(0),
-            natom_sc=natom_uc*ncells, ncells=ncells, max_factors=1,
+            strain_voigt_idx=np.zeros((0,1),dtype=np.int64), strain_power=np.zeros((0,1)),
+            strain_mask=np.zeros((0,1)),
+            natom_sc=natom_uc*ncells, ncells=ncells, max_factors=1, max_strains=1,
         )
 
     max_f = max(len(t["disps"]) for t in all_terms)
     max_f = max(max_f, 1)
+    max_s = max(len(t["strains"]) for t in all_terms)
+    max_s = max(max_s, 1)
     n = len(all_terms)
     natom_sc = natom_uc * ncells
 
@@ -113,8 +118,9 @@ def compile_terms(basis_coeffs: Sequence, ncell: tuple[int, int, int],
     direction = np.zeros((n, max_f), dtype=np.int64)
     power = np.zeros((n, max_f))
     factor_mask = np.zeros((n, max_f))
-    strain_voigt_idx = np.zeros(n, dtype=np.int64)
-    strain_power = np.zeros(n)
+    strain_voigt_idx = np.zeros((n, max_s), dtype=np.int64)
+    strain_power = np.zeros((n, max_s))
+    strain_mask = np.zeros((n, max_s))
 
     for i, t in enumerate(all_terms):
         coeff[i] = t["coeff"]
@@ -124,14 +130,17 @@ def compile_terms(basis_coeffs: Sequence, ncell: tuple[int, int, int],
             direction[i, j] = d
             power[i, j] = p
             factor_mask[i, j] = 1.0
-        strain_voigt_idx[i] = t["strain_voigt"]
-        strain_power[i] = t["strain_power"]
+        for k, (sv, sp) in enumerate(t["strains"]):
+            strain_voigt_idx[i, k] = sv
+            strain_power[i, k] = sp
+            strain_mask[i, k] = 1.0
 
     return CompiledTerms(
         coeff=coeff, atom_a=atom_a, atom_b=atom_b,
         direction=direction, power=power, factor_mask=factor_mask,
         strain_voigt_idx=strain_voigt_idx, strain_power=strain_power,
-        natom_sc=natom_sc, ncells=ncells, max_factors=max_f,
+        strain_mask=strain_mask,
+        natom_sc=natom_sc, ncells=ncells, max_factors=max_f, max_strains=max_s,
     )
 
 
@@ -148,12 +157,14 @@ def evaluate_numpy(compiled: CompiledTerms,
     for i in range(n):
         base = compiled.coeff[i]
 
-        sv = compiled.strain_voigt_idx[i]
-        sp = compiled.strain_power[i]
-        if sv > 0 and sp > 0:
-            strain_val = strain_voigt[sv - 1] ** sp
-        else:
-            strain_val = 1.0
+        strain_val = 1.0
+        for k in range(compiled.max_strains):
+            if compiled.strain_mask[i, k] == 0:
+                continue
+            sv = int(compiled.strain_voigt_idx[i, k])
+            sp = int(compiled.strain_power[i, k])
+            if sv > 0 and sp > 0:
+                strain_val *= strain_voigt[sv - 1] ** sp
 
         diffs = np.ones((max_f, c))
         for f in range(max_f):
@@ -180,11 +191,20 @@ def evaluate_numpy(compiled: CompiledTerms,
             np.add.at(forces[:, compiled.direction[i, f]], compiled.atom_a[i, f], -deriv)
             np.add.at(forces[:, compiled.direction[i, f]], compiled.atom_b[i, f], deriv)
 
-        if sv > 0 and sp > 0:
+        for k in range(compiled.max_strains):
+            if compiled.strain_mask[i, k] == 0:
+                continue
+            sv = int(compiled.strain_voigt_idx[i, k])
+            sp = int(compiled.strain_power[i, k])
+            if sv <= 0 or sp <= 0:
+                continue
+            # Compute partial derivative of term_energy w.r.t. strain[sv-1]
+            # d/d(ε) of (coeff * Π(ε_j^p_j) * prod_disp) = term_energy * p_k / ε_k
             s_val = strain_voigt[sv - 1]
             if abs(s_val) > 1e-12:
                 stress_voigt[sv - 1] += (term_energy * sp / s_val).sum()
             elif sp == 1:
+                # At ε=0, d(ε)/dε = 1, so stress = base * prod_disp
                 stress_voigt[sv - 1] += (base * prod).sum()
 
     return energy, forces, stress_voigt
@@ -210,38 +230,34 @@ def evaluate_jax(compiled: CompiledTerms,
     direction = jnp.array(compiled.direction)
     power = jnp.array(compiled.power)
     factor_mask = jnp.array(compiled.factor_mask)
-    sv_idx = jnp.array(compiled.strain_voigt_idx)
-    sp = jnp.array(compiled.strain_power)
+    sv_idx = jnp.array(compiled.strain_voigt_idx)  # (N, max_s)
+    sp = jnp.array(compiled.strain_power)           # (N, max_s)
+    sm = jnp.array(compiled.strain_mask)            # (N, max_s)
 
     disp = jnp.array(displacements)
     sv = jnp.array(strain_voigt)
 
-    disp_a = disp[atom_a, direction[:, :, None]]  # (N, F, C)
+    disp_a = disp[atom_a, direction[:, :, None]]
     disp_b = disp[atom_b, direction[:, :, None]]
-    diffs = disp_a - disp_b  # (N, F, C)
+    diffs = disp_a - disp_b
 
     safe_power = jnp.where(factor_mask > 0, power, 0.0)
     powered = jnp.where(factor_mask[:, :, None] > 0, diffs ** safe_power[:, :, None], 1.0)
 
-    total_prod = powered.prod(axis=1)  # (N, C)
+    total_prod = powered.prod(axis=1)
 
-    strain_mult = jnp.where(sv_idx > 0,
-                            jnp.where(sv_idx[:, None] > 0, sv[sv_idx - 1][:, None] ** sp[:, None], 1.0),
-                            1.0)[:, 0]  # (N,)
+    safe_sv = sv_idx - 1
+    safe_sv = jnp.where(sm > 0, safe_sv, 0)
+    strain_vals = jnp.where(sm > 0, sv[safe_sv] ** jnp.where(sm > 0, sp, 0), 1.0)
+    strain_mult = strain_vals.prod(axis=1)
 
-    term_energy = coeff[:, None] * strain_mult[:, None] * total_prod  # (N, C)
+    term_energy = coeff[:, None] * strain_mult[:, None] * total_prod
     energy = float(term_energy.sum())
 
-    # Vectorized: compute prod_without_f for ALL factors simultaneously.
-    # Use identity matrix over F dimension: for each output factor f_out,
-    # exclude input factor f_in == f_out from the product.
-    # For each factor f, compute product excluding f using identity matrix over F dim:
-    # masked_powered[f_out] = powered with input f_in replaced by 1 if f_in == f_out
     eye_f = jnp.eye(max_f)
     masked_powered = powered[:, None, :, :] * (1 - eye_f[None, :, :, None]) + eye_f[None, :, :, None]
     prod_without_f = masked_powered.prod(axis=2)
 
-    # diff**(power-1): for power=1 → 0**0 = 1.0, handles diffs=0 correctly
     safe_pm1 = jnp.where(factor_mask > 0, jnp.maximum(power - 1, 0), 0.0)
     diff_reduced = jnp.where(factor_mask[:, :, None] > 0,
                              diffs ** safe_pm1[:, :, None], 0.0)
@@ -260,16 +276,18 @@ def evaluate_jax(compiled: CompiledTerms,
 
     stress_voigt = np.zeros(6)
     for v in range(1, 7):
-        mask = (sv_idx == v)
-        if not bool(mask.any()):
-            continue
-        s_val = float(sv[v - 1])
-        if abs(s_val) > 1e-12:
-            contrib = term_energy * sp[:, None] * mask[:, None] / s_val
-            stress_voigt[v - 1] = float(contrib.sum())
-        elif float(sp[mask].max() if mask.any() else 0) == 1.0:
-            contrib = coeff[:, None] * total_prod * mask[:, None]
-            stress_voigt[v - 1] = float(contrib.sum())
+        for k in range(compiled.max_strains):
+            kmask = jnp.where((sv_idx[:, k] == v) & (sm[:, k] > 0), 1.0, 0.0)
+            if not bool(kmask.any()):
+                continue
+            pk = int(compiled.strain_power[:, k].max()) if bool(kmask.any()) else 0
+            s_val = float(sv[v - 1])
+            if abs(s_val) > 1e-12:
+                contrib = term_energy * float(pk) * kmask[:, None] / s_val
+                stress_voigt[v - 1] += float(contrib.sum())
+            elif pk == 1:
+                contrib = coeff[:, None] * total_prod * kmask[:, None]
+                stress_voigt[v - 1] += float(contrib.sum())
 
     return energy, forces, stress_voigt
 
