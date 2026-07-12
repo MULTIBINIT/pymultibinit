@@ -46,6 +46,8 @@ class PythonFitConfig:
     candidate_pool_size: Optional[int] = None
     feature_chunk_size: int = 512
     screening_frame_count: Optional[int] = None
+    include_pure_strain: bool = True
+    max_strain_power: int = 4
 
     def __post_init__(self) -> None:
         ncell = _tuple3_int(self.ncell, "ncell")
@@ -83,6 +85,8 @@ class PythonFitConfig:
             raise ValueError("power_range must be ordered as (min_power, max_power)")
         if any(value < 0 for value in power_range):
             raise ValueError("power_range values must be non-negative")
+        if self.max_strain_power < 1:
+            raise ValueError("max_strain_power must be at least 1")
 
         object.__setattr__(self, "ncell", ncell)
         object.__setattr__(self, "fit_on", fit_on)
@@ -94,6 +98,8 @@ class PythonFitConfig:
         object.__setattr__(self, "screening_frame_count", int(self.screening_frame_count) if self.screening_frame_count is not None else None)
         object.__setattr__(self, "cutoff", float(self.cutoff) if self.cutoff is not None else None)
         object.__setattr__(self, "power_range", power_range)
+        object.__setattr__(self, "include_pure_strain", bool(self.include_pure_strain))
+        object.__setattr__(self, "max_strain_power", int(self.max_strain_power))
 
 
 @dataclass(frozen=True)
@@ -1525,6 +1531,8 @@ def generate_displacement_basis(
     atom_mappings=None,
     include_strain_coupling: bool = False,
     strain_voigts: Sequence[int] = (1, 2, 3, 4, 5, 6),
+    include_pure_strain: bool = True,
+    max_strain_power: int = 4,
 ) -> list[XmlBasisFunction]:
     """Generate deterministic displacement and optional strain-coupling XML basis functions."""
     positions = np.asarray(xcart, dtype=float)
@@ -1555,6 +1563,8 @@ def generate_displacement_basis(
             basis.append(_basis_from_orbit(len(basis) + 1, representative, orbit))
 
     if include_strain_coupling:
+        symrel_ops = [np.eye(3, dtype=int)] if symrel is None else symrel
+        strain_maps = _compute_strain_symmetry_map(symrel_ops)
         for total_power in range(min_power, max_power + 1):
             displacement_power = total_power - 1
             if displacement_power < 1:
@@ -1564,8 +1574,37 @@ def generate_displacement_basis(
                 accepted = _accepted_displacement_orbits(factors, actions, displacement_power)
                 accepted_by_power[displacement_power] = accepted
             for representative, orbit in sorted(accepted.items(), key=lambda item: _monomial_sort_key(item[0])):
-                for voigt in strain_indices:
-                    basis.append(_basis_from_orbit(len(basis) + 1, representative, orbit, strains=({"power": 1, "voigt": voigt},)))
+                nbody_disp = len(representative.factors)
+                seen_strains = set()
+                for total_sp in range(1, max_strain_power + 1):
+                    if nbody_disp + total_sp > total_power:
+                        continue
+                    for strain_combo in combinations_with_replacement(strain_indices, total_sp):
+                        raw = tuple((v, 1) for v in strain_combo)
+                        canon = _canonicalize_strain_combo(raw, strain_maps)
+                        if canon in seen_strains:
+                            continue
+                        seen_strains.add(canon)
+                        strains = tuple({"power": p, "voigt": v} for v, p in canon)
+                        basis.append(_basis_from_orbit(len(basis) + 1, representative, orbit, strains=strains))
+
+    if include_pure_strain:
+        symrel_ops = [np.eye(3, dtype=int)] if symrel is None else symrel
+        strain_maps = _compute_strain_symmetry_map(symrel_ops)
+        seen_strains = set()
+        for total_sp in range(1, max_strain_power + 1):
+            for strain_combo in combinations_with_replacement(strain_indices, total_sp):
+                raw = tuple((v, 1) for v in strain_combo)
+                canon = _canonicalize_strain_combo(raw, strain_maps)
+                if canon in seen_strains:
+                    continue
+                seen_strains.add(canon)
+                strains = tuple({"power": p, "voigt": v} for v, p in canon)
+                terms = ({"weight": 1.0, "displacements": (), "strains": strains},)
+                text = "*".join(_strain_text(s) for s in strains)
+                basis.append(XmlBasisFunction(
+                    number=len(basis) + 1, value=0.0, text=text, terms=terms,
+                ))
 
     return basis
 
@@ -2607,6 +2646,32 @@ def _fortran_combination_has_nonzero_terms(combo: tuple[int, ...], pair_list: Fo
     return any(weight != 0 for weight in terms.values())
 
 
+def _merge_strain_combo(combo):
+    """Merge repeated voigt indices into higher-power strain factors."""
+    from collections import Counter
+    counts = Counter(combo)
+    return tuple({"power": pw, "voigt": v} for v, pw in sorted(counts.items()))
+
+
+def _canonicalize_strain_combo(combo, strain_maps):
+    """Apply symmetry operations to a strain combo and return the canonical form.
+
+    combo is a tuple of (voigt_1based, power) pairs.
+    Returns the lexicographically smallest combo among all symmetry images.
+    """
+    best = tuple(sorted(combo))
+    for smap in strain_maps:
+        mapped = []
+        for v, p in combo:
+            raw = smap[v - 1]
+            new_v = abs(raw)
+            mapped.append((new_v, p))
+        candidate = tuple(sorted(mapped))
+        if candidate < best:
+            best = candidate
+    return best
+
+
 def generate_fortran_anchored_basis(
     xcart,
     xred,
@@ -2619,6 +2684,8 @@ def generate_fortran_anchored_basis(
     atom_types: Sequence[int] | None = None,
     include_strain_coupling: bool = False,
     strain_voigts: Sequence[int] = (1, 2, 3, 4, 5, 6),
+    include_pure_strain: bool = False,
+    max_strain_power: int = 1,
     max_nbody: int | None = None,
 ) -> list[XmlBasisFunction]:
     """Generate an anchored displacement basis matching Fortran ``fit_iatom=-2``.
@@ -2651,7 +2718,6 @@ def generate_fortran_anchored_basis(
             ncell=ncell_tuple, rprimd=lattice, tnons=translations,
         )
 
-        from itertools import combinations_with_replacement
         cell_to_index = {cell: idx for idx, cell in enumerate(pair_list.cells)}
         compatible_all = _fortran_pair_compatibility(
             pair_list.factors, pair_list.dist, cell_to_index, lattice, ncell_tuple,
@@ -2707,12 +2773,43 @@ def generate_fortran_anchored_basis(
 
             if include_strain_coupling:
                 nbody_disp = len(representative.factors)
-                if max_nbody is None or nbody_disp + 1 <= max_nbody:
-                    for voigt in strain_voigts:
+                symrel_list = [np.eye(3, dtype=int)] if symrel is None else symrel
+                strain_maps = _compute_strain_symmetry_map(symrel_list)
+                seen_strains = set()
+                for total_sp in range(1, max_strain_power + 1):
+                    if max_nbody is not None and nbody_disp + total_sp > max_nbody:
+                        continue
+                    for strain_combo in combinations_with_replacement(strain_voigts, total_sp):
+                        raw = tuple((v, 1) for v in strain_combo)
+                        canon = _canonicalize_strain_combo(raw, strain_maps)
+                        if canon in seen_strains:
+                            continue
+                        seen_strains.add(canon)
+                        strains = tuple({"power": p, "voigt": v} for v, p in canon)
                         basis.append(_basis_from_orbit(
                             len(basis) + 1, representative, orbit,
-                            strains=({"power": 1, "voigt": voigt},),
+                            strains=strains,
                         ))
+
+    if include_pure_strain:
+        symrel_list = [np.eye(3, dtype=int)] if symrel is None else symrel
+        strain_maps = _compute_strain_symmetry_map(symrel_list)
+        seen_strains = set()
+        for total_sp in range(1, max_strain_power + 1):
+            if max_nbody is not None and total_sp > max_nbody:
+                continue
+            for strain_combo in combinations_with_replacement(strain_voigts, total_sp):
+                raw = tuple((v, 1) for v in strain_combo)
+                canon = _canonicalize_strain_combo(raw, strain_maps)
+                if canon in seen_strains:
+                    continue
+                seen_strains.add(canon)
+                strains = tuple({"power": p, "voigt": v} for v, p in canon)
+                terms = ({"weight": 1.0, "displacements": (), "strains": strains},)
+                text = "*".join(_strain_text(s) for s in strains)
+                basis.append(XmlBasisFunction(
+                    number=len(basis) + 1, value=0.0, text=text, terms=terms,
+                ))
 
     return basis
 
@@ -2833,6 +2930,45 @@ def _cartesian_direction_rotation(symrel: np.ndarray, rprimd) -> np.ndarray:
     if not np.allclose(rotation, rounded, atol=1e-8):
         raise ValueError("Symmetry operation is not a Cartesian signed-axis permutation for factor actions")
     return rounded
+
+
+_VOGUIT_TO_PAIR = [(0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1)]
+_PAIR_TO_VOGIUT = {(0, 0): 0, (1, 1): 1, (2, 2): 2, (1, 2): 3, (2, 1): 3, (0, 2): 4, (2, 0): 4, (0, 1): 5, (1, 0): 5}
+
+
+def _compute_strain_symmetry_map(symrel_ops):
+    """Compute how each symmetry operation maps the 6 Voigt strain components.
+
+    Returns a list of arrays, one per symmetry operation. Each array has shape
+    (6,) with entries (mapped_voigt_index, sign) packed as:
+        result[ia] = (mapped_voigt_1based * sign)
+    where mapped_voigt is 1-based and sign is +1 or -1.
+    """
+    maps = []
+    for symrel in symrel_ops:
+        S = np.asarray(symrel, dtype=float)
+        smap = np.zeros(6, dtype=int)
+        for ia in range(6):
+            mu, nu = _VOGUIT_TO_PAIR[ia]
+            best_v = 0
+            best_s = 1
+            for j in range(3):
+                for k in range(3):
+                    coeff = int(round(S[mu, j] * S[nu, k]))
+                    if coeff == 0:
+                        continue
+                    if j == k:
+                        voigt = j
+                    else:
+                        voigt = _PAIR_TO_VOGIUT[(j, k)]
+                    if best_v == 0:
+                        best_v = voigt + 1
+                        best_s = coeff
+                    elif voigt + 1 == best_v:
+                        best_s += coeff
+            smap[ia] = best_v * best_s if best_v > 0 else 1
+        maps.append(smap)
+    return maps
 
 
 def _map_atom(atom: int, mapping) -> tuple[int, tuple[int, int, int]]:
