@@ -24,6 +24,7 @@ from pymultibinit.pyeffpot.datastructures import (
 from pymultibinit.pyeffpot.supercell_builder import (
     build_supercell,
     _build_supercell_geometry,
+    _expand_dynmat_to_full_bz,
     _supercell_atom_index,
     _apply_asr,
     set_anharmonic_coeffs
@@ -208,6 +209,18 @@ class TestSupercellBuilder:
         np.testing.assert_allclose(crystal_sc.xred[index], [(1.0 + 0.5) / 2.0, (2.0 + 0.5) / 3.0, (3.0 + 0.5) / 4.0])
         assert crystal_sc.typat[index] == simple_unitcell.crystal.typat[1]
 
+    def test_expand_dynmat_uses_last_symdm9_match(self):
+        qibz = np.array([[0.25, 0.0, 0.0], [-0.25, 0.0, 0.0]])
+        qbz = qibz[:1]
+        dynmat = np.zeros((2, 1, 3, 1, 3, 2))
+        dynmat[0, 0, :, 0, :, 0] = np.eye(3)
+        dynmat[1, 0, :, 0, :, 0] = 2 * np.eye(3)
+        result = _expand_dynmat_to_full_bz(
+            qibz, dynmat, qbz, np.eye(3, dtype=int)[None, ...], np.eye(3),
+            np.zeros((1, 3)), np.zeros((1, 3)), use_rotation=True,
+        )
+        np.testing.assert_allclose(result[0], dynmat[1], atol=1e-12, rtol=0)
+
     def test_anharmonic_xml_indices_follow_geometry_order_for_noncubic_cells(self, simple_unitcell):
         ncell = (2, 3, 4)
         supercell = build_supercell(simple_unitcell, ncell)
@@ -255,7 +268,6 @@ class TestSupercellBuilder:
         supercell = build_supercell(unitcell, (2, 2, 2))
         assert supercell.natom_sc == 40
         assert supercell.ifcs_sc.atmfrc.shape == (3, 40, 3, 40, 1)
-
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

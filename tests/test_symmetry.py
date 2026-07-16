@@ -23,18 +23,14 @@ class TestReciprocalSymmetry:
         np.testing.assert_array_equal(symrec, symrel)
 
     def test_c4_rotation(self):
-        """C4 rotation around z-axis."""
+        """C4 rotation around z-axis: symrec = (S^-1)^T (ABINIT mati3inv)."""
         symrel = np.array([
             [0, -1, 0],
             [1, 0, 0],
             [0, 0, 1]
         ], dtype=int)
         symrec = get_reciprocal_symmetry(symrel)
-        expected = np.array([
-            [0, 1, 0],
-            [-1, 0, 0],
-            [0, 0, 1]
-        ], dtype=float)
+        expected = np.linalg.inv(symrel).T
         np.testing.assert_allclose(symrec, expected, atol=1e-10)
 
     def test_multiple_symmetries(self):

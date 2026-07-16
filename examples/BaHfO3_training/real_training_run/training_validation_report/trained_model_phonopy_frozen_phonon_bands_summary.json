@@ -1,0 +1,16 @@
+{
+  "method": "phonopy finite displacement using custom ASE calculator wrapping pymultibinit pyeffpot EffectivePotential",
+  "ddb": "/home/hexu/projects/atomchain_dev/atomchain/.tmp/batio3_ddb_example/BaTiO3_stress.ddb",
+  "xml": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/fortran_parity_ncoeff20_power34/BaTiO3_fit_python_ncoeff20_power34_dipdip0.xml",
+  "supercell_matrix": [
+    2,
+    2,
+    2
+  ],
+  "displacement_distance_angstrom": 0.01,
+  "n_displacements": 3,
+  "frequency_min_cm-1": -76.72670436115483,
+  "frequency_max_cm-1": 162.2384516955636,
+  "figure": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/training_validation_report/trained_model_phonopy_frozen_phonon_bands.png",
+  "data": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/training_validation_report/trained_model_phonopy_frozen_phonon_bands_cm1.dat"
+}

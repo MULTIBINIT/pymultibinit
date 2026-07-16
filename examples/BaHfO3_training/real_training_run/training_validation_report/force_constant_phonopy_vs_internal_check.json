@@ -1,0 +1,25 @@
+{
+  "n_displacements": 6,
+  "phonopy_fc_shape": [
+    40,
+    40,
+    3,
+    3
+  ],
+  "internal_phi_shape": [
+    40,
+    40,
+    3,
+    3
+  ],
+  "phonopy_fc_norm": 6.1760452064035,
+  "internal_phi_norm": 7.048672254264702,
+  "diff_fc_minus_phi_norm": 4.905249432039214,
+  "diff_fc_plus_phi_norm": 12.312317324071884,
+  "relative_diff_minus_phi": 0.6959111241228957,
+  "relative_diff_plus_phi": 1.7467569607343407,
+  "max_abs_fc": 0.49712327912931265,
+  "max_abs_phi": 0.49712327912931875,
+  "max_abs_diff_minus_phi": 0.28770515814059183,
+  "max_abs_diff_plus_phi": 0.9942465582586314
+}

@@ -1,0 +1,18 @@
+{
+  "artifacts": {
+    "BaTiO3_fit_refddb_iatom_minus1": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_refddb_iatom_minus1_fixmaxforce/BaTiO3_fit_refddb_iatom_minus1"
+  },
+  "command": [
+    "/home/hexu/projects/abinit_git/abinit_fixmaxforce/build/src/98_main/multibinit",
+    "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_fit_refddb_iatom_minus1.abi"
+  ],
+  "config": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_fit_refddb_iatom_minus1.abi",
+  "ddb": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_fit_refddb_iatom_minus1.abi",
+  "hist": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_multibinit_HIST.nc",
+  "log_file": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_refddb_iatom_minus1_fixmaxforce/multibinit.stdout.log",
+  "metadata_file": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_refddb_iatom_minus1_fixmaxforce/pymultibinit_training_result.json",
+  "model_config": null,
+  "output_dir": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_refddb_iatom_minus1_fixmaxforce",
+  "returncode": 14,
+  "stderr_file": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_refddb_iatom_minus1_fixmaxforce/multibinit.stderr.log"
+}

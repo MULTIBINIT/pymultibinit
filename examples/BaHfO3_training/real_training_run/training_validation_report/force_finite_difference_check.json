@@ -1,0 +1,106 @@
+{
+  "harmonic_only": {
+    "label": "harmonic_only",
+    "energy_ha": 8.139547506823714e-07,
+    "max_abs_force_diff_ha_bohr": 9.44668741018409e-16,
+    "samples": [
+      {
+        "atom": 0,
+        "direction": 0,
+        "analytic_ha_bohr": -6.746569188278745e-05,
+        "finite_difference_ha_bohr": -6.746569188277979e-05,
+        "diff_ha_bohr": -7.657177843178875e-18,
+        "analytic_ev_ang": -0.003469225360333708,
+        "finite_difference_ev_ang": -0.0034692253603333142
+      },
+      {
+        "atom": 3,
+        "direction": 1,
+        "analytic_ha_bohr": 2.490759643217205e-05,
+        "finite_difference_ha_bohr": 2.4907596432170387e-05,
+        "diff_ha_bohr": 1.6635727084074459e-18,
+        "analytic_ev_ang": 0.001280800104408245,
+        "finite_difference_ev_ang": 0.0012808001044081595
+      },
+      {
+        "atom": 7,
+        "direction": 2,
+        "analytic_ha_bohr": -2.4903083418379262e-05,
+        "finite_difference_ha_bohr": -2.4903083417434593e-05,
+        "diff_ha_bohr": -9.44668741018409e-16,
+        "analytic_ev_ang": -0.0012805680359084708,
+        "finite_difference_ev_ang": -0.0012805680358598938
+      },
+      {
+        "atom": 10,
+        "direction": 0,
+        "analytic_ha_bohr": -3.6228696141324283e-06,
+        "finite_difference_ha_bohr": -3.6228696141301273e-06,
+        "diff_ha_bohr": -2.300965001216307e-18,
+        "analytic_ev_ang": -0.00018629544575584844,
+        "finite_difference_ev_ang": -0.00018629544575573013
+      },
+      {
+        "atom": 15,
+        "direction": 2,
+        "analytic_ha_bohr": 1.5949229470403502e-06,
+        "finite_difference_ha_bohr": 1.5949229469846516e-06,
+        "diff_ha_bohr": 5.569855727083784e-17,
+        "analytic_ev_ang": 8.201423540224943e-05,
+        "finite_difference_ev_ang": 8.201423539938529e-05
+      }
+    ]
+  },
+  "trained_full": {
+    "label": "trained_full",
+    "energy_ha": 8.165822275751531e-07,
+    "max_abs_force_diff_ha_bohr": 1.1612226784795624e-12,
+    "samples": [
+      {
+        "atom": 0,
+        "direction": 0,
+        "analytic_ha_bohr": -6.746569188278745e-05,
+        "finite_difference_ha_bohr": -6.746569188277979e-05,
+        "diff_ha_bohr": -7.657177843178875e-18,
+        "analytic_ev_ang": -0.003469225360333708,
+        "finite_difference_ev_ang": -0.0034692253603333142
+      },
+      {
+        "atom": 3,
+        "direction": 1,
+        "analytic_ha_bohr": 2.5966753861925082e-05,
+        "finite_difference_ha_bohr": 2.596675502314776e-05,
+        "diff_ha_bohr": -1.1612226784795624e-12,
+        "analytic_ev_ang": 0.0013352641692290573,
+        "finite_difference_ev_ang": 0.0013352642289415283
+      },
+      {
+        "atom": 7,
+        "direction": 2,
+        "analytic_ha_bohr": -2.5009409989008144e-05,
+        "finite_difference_ha_bohr": -2.5009410263227146e-05,
+        "diff_ha_bohr": 2.742190019977206e-13,
+        "analytic_ev_ang": -0.0012860355679978753,
+        "finite_difference_ev_ang": -0.0012860355820987835
+      },
+      {
+        "atom": 10,
+        "direction": 0,
+        "analytic_ha_bohr": -3.6228696141324283e-06,
+        "finite_difference_ha_bohr": -3.6228696141301273e-06,
+        "diff_ha_bohr": -2.300965001216307e-18,
+        "analytic_ev_ang": -0.00018629544575584844,
+        "finite_difference_ev_ang": -0.00018629544575573013
+      },
+      {
+        "atom": 15,
+        "direction": 2,
+        "analytic_ha_bohr": 1.5949229470403502e-06,
+        "finite_difference_ha_bohr": 1.5949229469846516e-06,
+        "diff_ha_bohr": 5.569855727083784e-17,
+        "analytic_ev_ang": 8.201423540224943e-05,
+        "finite_difference_ev_ang": 8.201423539938529e-05
+      }
+    ]
+  }
+}

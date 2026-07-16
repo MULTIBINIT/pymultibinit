@@ -262,6 +262,7 @@ class MultibinitPotential:
                   match_tolerance=match_tolerance)
         
         unitcell = read_ddb(ddb_file)
+        print(f"dipdip={dipdip}, asr={asr}, ncell={ncell}")
         supercell = build_supercell(unitcell, ncell, dipdip=dipdip, asr=asr)
         
         if xml_file:

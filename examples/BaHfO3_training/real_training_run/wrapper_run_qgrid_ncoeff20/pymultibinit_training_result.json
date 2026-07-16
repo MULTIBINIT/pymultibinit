@@ -1,0 +1,21 @@
+{
+  "artifacts": {
+    "BaTiO3_fit": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20/BaTiO3_fit",
+    "BaTiO3_fit0001": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20/BaTiO3_fit0001",
+    "BaTiO3_fit0002": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20/BaTiO3_fit0002",
+    "BaTiO3_fit0003": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20/BaTiO3_fit0003"
+  },
+  "command": [
+    "/home/hexu/projects/abibuildbot_dev/abibuildbot/docker-worker-ubuntu22-gcc-openmpi-openblas/state/docker_ubuntu22.04_gnu_openmpi_openblas/abinit_master/src/98_main/multibinit",
+    "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_fit.abi"
+  ],
+  "config": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_fit.abi",
+  "ddb": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_fit.abi",
+  "hist": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_multibinit_HIST.nc",
+  "log_file": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20/multibinit.stdout.log",
+  "metadata_file": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20/pymultibinit_training_result.json",
+  "model_config": null,
+  "output_dir": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20",
+  "returncode": 14,
+  "stderr_file": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/wrapper_run_qgrid_ncoeff20/multibinit.stderr.log"
+}

@@ -1,0 +1,350 @@
+******************************************************************************************
+                                Welcome to MULTIBINIT,                         
+ a software platform designed for the construction and use of second-principles models
+                   for lattice, spin and electron degrees of freedom.
+
+.Version 10.6.5 of MULTIBINIT 
+.(MPI version, prepared for a x86_64_linux_gnu11.4 computer) 
+
+.Copyright (C) 1998-2026 ABINIT group . 
+ MULTIBINIT comes with ABSOLUTELY NO WARRANTY.
+ It is free software, and you are welcome to redistribute it
+ under certain conditions (GNU General Public License,
+ see ~abinit/COPYING or http://www.gnu.org/copyleft/gpl.txt).
+
+ MULTIBINIT is a software project of the University of Liege
+ (PHYTHEMA & NANOMAT groups), in collaboration with other partners.
+
+-----------------------------------------------------------------------------------------
+
+                          MULTIBINIT - LATTICE MODELS                   
+
+ Project initiated and coordinated by Philippe GHOSEZ and his group at ULiege
+   (Philippe.Ghosez@uliege.be).
+
+ Main contributors: Alexandre MARTIN, Jordan BIEDER, Michael Marcus SCHMITT,
+   Louis BASTOGNE, Xu HE, Alireza SASANI, Huazhang ZHANG, Subhadeep BANDYOPADHYAY,
+   Philippe GHOSEZ.
+
+ Technical support: Xu HE (X.He@uliege.be)
+
+*****************************************************************************************
+
+
+
+.Starting date : Tue  5 May 2026.
+- ( at 16h40 )
+  
+- The starting date is more than 3 years after the initial release
+- of this version of ABINIT, namely Jul 2022.
+- This version of ABINIT is not supported anymore.
+- Action: please, switch to a more recent version of ABINIT.
+-  nproc =    1
+
+================================================================================
+
+ Read the information in the reference structure in 
+-/home/hexu/projects/atomchain_dev/atomchain/.tmp/batio3_ddb_example/BaTiO3_stress.ddb
+ to initialize the multibinit input
+
+================================================================================
+
+ -outvars_multibinit: echo values of input variables ----------------------
+
+ Flags : 
+     ifcflag         1
+   prt_model         4
+     strcpli        -1
+ Fit the coefficients :
+         fit_coeff  1
+ fit_generateCoeff  1
+ fit_initializeDat  0
+        fit_cutoff  8.00000000E+00
+       fit_droprat  0.00000000E+00
+        fit_option  0
+         fit_iatom  0
+        fit_ncoeff  3
+          fit_grid  1  1  1
+         ts_option  0
+    fit_rangePower  3  3
+     fit_dispterms  1
+    fit_anhaStrain  0
+    fit_SPCoupling  0
+      fit_SPC_maxS  1
+     fit_max_nbody        999
+ Interatomic Force Constants Inputs :
+      dipdip         0
+      ifcana         0
+      ifcout   2000000
+      natifc         5
+       atifc         1   2   3   4   5
+ Description of grid 1 :
+        brav         1
+       ngqpt         2         2         2
+      nqshft         1
+      q1shft
+                     0.00000000E+00  0.00000000E+00  0.00000000E+00
+ First list of wavevector (reduced coord.) :
+       nph1l         1
+       qph1l
+                     0.00000000E+00  0.00000000E+00  0.00000000E+00    0.000E+00
+
+================================================================================
+
+ Read the DDB information of the reference system and perform some checks
+
+
+  ==== Info on the Cryst% object ====
+ Real(R)+Recip(G) space primitive vectors, cartesian coordinates (Bohr,Bohr^-1):
+ R(1)=  7.5589045  0.0000000  0.0000000  G(1)=  0.1322943  0.0000000  0.0000000
+ R(2)=  0.0000000  7.5589045  0.0000000  G(2)=  0.0000000  0.1322943  0.0000000
+ R(3)=  0.0000000  0.0000000  7.5589045  G(3)=  0.0000000  0.0000000  0.1322943
+ Unit cell volume ucvol=  4.3189341E+02 bohr^3
+ Angles (23,13,12)=  9.00000000E+01  9.00000000E+01  9.00000000E+01 degrees
+ Time-reversal symmetry is present
+ Reduced atomic positions [iatom, xred, symbol]:
+    1)    0.0000000  0.0000000  0.0000000  Ba
+    2)    0.5000000  0.5000000  0.5000000  Ti
+    3)    0.5000000  0.5000000  0.0000000   O
+    4)    0.5000000  0.0000000  0.5000000   O
+    5)    0.0000000  0.5000000  0.5000000   O
+
+ DDB file with 8 blocks has been read.
+
+================================================================================
+
+ Extraction of the energy of the structure (unit: Hartree)
+
+ Energy  =        0.000000000000E+00
+
+================================================================================
+
+ Extraction of the stress tensor (unit: GPa) and forces (unit: Ha/bohr)
+
+ --- !WARNING:
+     The stress tensor of the reference structure is not specify
+     The stress tensor will be set to zero
+ ---
+
+================================================================================
+
+ Extraction of the clamped elastic tensor (unit:10^2GPa)
+
+   3.1057486   1.0996354   1.0995097  -0.0000941  -0.0000576  -0.0000953
+   1.0995585   3.1058061   1.0994685  -0.0002172   0.0000000  -0.0000964
+   1.0995260   1.0995854   3.1057268  -0.0001535  -0.0000975  -0.0000387
+   0.0000011  -0.0000031  -0.0000112   1.2969223  -0.0000034  -0.0000147
+  -0.0000001  -0.0000037  -0.0000031   0.0000090   1.2969304  -0.0000042
+   0.0000026   0.0000004  -0.0000015  -0.0000116  -0.0000041   1.2969299
+
+================================================================================
+
+ Calculation of acoustic sum rule
+
+
+================================================================================
+
+ Calculation of the interatomic forces from DDB
+
+       Homogeneous q point set in the B.Z.
+ Grid q points  :        8
+  1)   0.00000000E+00  0.00000000E+00  0.00000000E+00
+  2)   5.00000000E-01  0.00000000E+00  0.00000000E+00
+  3)   0.00000000E+00  5.00000000E-01  0.00000000E+00
+  4)   5.00000000E-01  5.00000000E-01  0.00000000E+00
+  5)   0.00000000E+00  0.00000000E+00  5.00000000E-01
+  6)   5.00000000E-01  0.00000000E+00  5.00000000E-01
+  7)   0.00000000E+00  5.00000000E-01  5.00000000E-01
+  8)   5.00000000E-01  5.00000000E-01  5.00000000E-01
+
+ The interatomic forces have been obtained
+
+================================================================================
+
+ Calculation of dynamical matrix for each ph1l points
+
+  Phonon at Gamma, with non-analyticity in the
+  direction (cartesian coordinates)  0.00000  0.00000  0.00000
+ Phonon energies in Hartree :
+  -1.233241E-04 -1.233241E-04 -1.233241E-04  6.929033E-08  6.932331E-08
+   6.942216E-08  1.064940E-04  1.064940E-04  1.064940E-04  1.748843E-04
+   1.748843E-04  1.748843E-04  2.831074E-04  2.831074E-04  2.831074E-04
+ Phonon frequencies in cm-1    :
+- -2.706651E+01 -2.706651E+01 -2.706651E+01  1.520747E-02  1.521471E-02
+-  1.523640E-02  2.337274E+01  2.337274E+01  2.337274E+01  3.838266E+01
+-  3.838266E+01  3.838266E+01  6.213488E+01  6.213488E+01  6.213488E+01
+
+================================================================================
+
+ Calculation of the internal-strain  tensor
+
+ Force-response internal strain tensor(Unit:Hartree/bohr)
+
+ Atom dir   strainxx    strainyy    strainzz    strainyz    strainxz    strainxy
+  1  x     0.0000000   0.0000001   0.0000000   0.0000000  -0.0000001   0.0000002
+  1  y     0.0000001   0.0000002  -0.0000000   0.0000003  -0.0000000  -0.0000001
+  1  z     0.0000000   0.0000002  -0.0000001   0.0000003   0.0000003   0.0000002
+  2  x     0.0000001   0.0000002   0.0000001  -0.0000006  -0.0000018  -0.0000016
+  2  y    -0.0000002   0.0000002  -0.0000000  -0.0000013   0.0000001  -0.0000018
+  2  z     0.0000000  -0.0000006   0.0000003  -0.0000010  -0.0000014   0.0000006
+  3  x    -0.0000002  -0.0000002  -0.0000000  -0.0000001   0.0000007   0.0000002
+  3  y    -0.0000004  -0.0000001   0.0000000   0.0000006  -0.0000004   0.0000018
+  3  z    -0.0000005  -0.0000001  -0.0000003   0.0000007  -0.0000011  -0.0000011
+  4  x    -0.0000002   0.0000001  -0.0000002  -0.0000001   0.0000018   0.0000005
+  4  y     0.0000008  -0.0000000   0.0000003  -0.0000013   0.0000001  -0.0000005
+  4  z     0.0000002   0.0000001  -0.0000001   0.0000002   0.0000013  -0.0000000
+  5  x     0.0000002  -0.0000001   0.0000001   0.0000008  -0.0000005   0.0000008
+  5  y    -0.0000003  -0.0000003  -0.0000002   0.0000016   0.0000002   0.0000005
+  5  z     0.0000002   0.0000004   0.0000003  -0.0000002   0.0000009   0.0000003
+
+
+
+ Bound for ifc SR:
+
+ x=[ -1  1], y=[ -1  1] and z=[ -1  1]
+
+================================================================================
+
+ Impose acoustic sum rule on total ifc
+
+================================================================================
+
+================================================================================
+
+ There is no file for the coefficients from polynomial fitting
+
+================================================================================
+
+-Reading the training-set file :
+-/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/BaTiO3_multibinit_HIST.nc
+
+
+================================================================================
+
+  Starting Fit Iterations  
+  -----------------------  
+  Select in total fit_ncoeff =   3 coefficients
+  In   1 iterations
+  Over   3 irreducible atoms
+  Selecting   1 coefficients per atom in each iteration
+
+
+--------------------------------------------------------------------------------
+
+ Start Iteration (  1/  1)
+
+
+--------------------------------------------------------------------------------
+
+ Starting Fit process
+
+--------------------------------------------------------------------------------
+
+ The coefficients for the fit around atom  1: Ba, will be generated
+
+ 1731 coefficients generated 
+
+
+ Goal function values at the begining of the fit process (eV^2/A^2):
+   Energy          :   1.1167251663655129E-05
+   Forces+Stresses :   4.3307787288050646E-04
+   Forces          :   4.3307308289974492E-04
+   Stresses        :   4.7899807615411091E-09
+
+ N   Selecting          MSDE              MSDFS              MSDF              MSDS
+    Coefficient      (eV^2/A^2)        (eV^2/A^2)        (eV^2/A^2)        (eV^2/A^2)
+ 1     93          9.9098205819E-06  4.0643027919E-04  4.0641231699E-04  1.7962195877E-08
+
+ Fitted coefficients at the end of the fit process:
+ 93 =>   1.3830472511E-02 (Ba_x-O1_x)^1(Ba_y-O3_y)^1(Ba_y-O2_y[-1 0 -1])^1
+
+ Goal function values at the end of the fit process (eV^2/A^2):
+   Energy          :   9.9098205819069618E-06
+   Forces+Stresses :   4.0643027918812943E-04
+   Forces          :   4.0641231699225280E-04
+   Stresses        :   1.7962195876628803E-08
+
+
+--------------------------------------------------------------------------------
+
+ Starting Fit process
+
+--------------------------------------------------------------------------------
+
+ The coefficients present in the effective potential will be used for the fit
+
+ The coefficients for the fit around atom  2: Ti, will be generated
+
+ 738 coefficients generated 
+
+
+ Goal function values at the begining of the fit process (eV^2/A^2):
+   Energy          :   1.1167251663655129E-05
+   Forces+Stresses :   4.3307787288050646E-04
+   Forces          :   4.3307308289974492E-04
+   Stresses        :   4.7899807615411091E-09
+
+ N   Selecting          MSDE              MSDFS              MSDF              MSDS
+    Coefficient      (eV^2/A^2)        (eV^2/A^2)        (eV^2/A^2)        (eV^2/A^2)
+ 2     194         8.7559310594E-06  3.8136963293E-04  3.8133110480E-04  3.8528136225E-08
+
+ Fitted coefficients at the end of the fit process:
+ 1 =>   1.3353763166E-02 (Ba_x-O1_x)^1(Ba_y-O3_y)^1(Ba_y-O2_y[-1 0 -1])^1
+ 194 =>   1.5097950287E-02 (Ti_x-O1_x)^1(Ti_x-Ba_x[1 1 1])^1(Ti_z-Ba_z[0 1 1])^1
+
+ Goal function values at the end of the fit process (eV^2/A^2):
+   Energy          :   8.7559310593686952E-06
+   Forces+Stresses :   3.8136963293415761E-04
+   Forces          :   3.8133110479793303E-04
+   Stresses        :   3.8528136224607743E-08
+
+
+--------------------------------------------------------------------------------
+
+ Starting Fit process
+
+--------------------------------------------------------------------------------
+
+ The coefficients present in the effective potential will be used for the fit
+
+ The coefficients for the fit around atom  3: O1, will be generated
+
+ 1387 coefficients generated 
+
+
+ Goal function values at the begining of the fit process (eV^2/A^2):
+   Energy          :   1.1167251663655129E-05
+   Forces+Stresses :   4.3307787288050646E-04
+   Forces          :   4.3307308289974492E-04
+   Stresses        :   4.7899807615411091E-09
+
+ N   Selecting          MSDE              MSDFS              MSDF              MSDS
+    Coefficient      (eV^2/A^2)        (eV^2/A^2)        (eV^2/A^2)        (eV^2/A^2)
+ 3     1110        7.9674930314E-06  3.5648523472E-04  3.5643034211E-04  5.4892607402E-08
+
+ Fitted coefficients at the end of the fit process:
+ 1 =>   1.2472626319E-02 (Ba_x-O1_x)^1(Ba_y-O3_y)^1(Ba_y-O2_y[-1 0 -1])^1
+ 2 =>   1.4857361483E-02 (Ti_x-O1_x)^1(Ti_x-Ba_x[1 1 1])^1(Ti_z-Ba_z[0 1 1])^1
+ 1110 =>  -2.6339871272E-02 (O1_x-O2_x)^1(O1_y-O2_y[0 1 0])^1(O1_x-O1_x[0 1 0])^1
+
+ Goal function values at the end of the fit process (eV^2/A^2):
+   Energy          :   7.9674930314071740E-06
+   Forces+Stresses :   3.5648523471801100E-04
+   Forces          :   3.5643034211060902E-04
+   Stresses        :   5.4892607401992279E-08
+
+
+================================================================================
+
+ Generation of the xml file for the fitted polynomial in BaTiO3_fit_coeffs.xml
+
+================================================================================
+
+-
+- Proc.   0 individual time (sec): cpu=          9.1  wall=          9.1
+
+================================================================================
+
++Total cpu time      9.133  and wall time      9.134 sec
+
+ multibinit : the run completed successfully.
