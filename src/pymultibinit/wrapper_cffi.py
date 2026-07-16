@@ -80,8 +80,8 @@ class MultibinitWrapperCFFI:
         
         with open(abi_path, 'r') as f:
             for line in f:
-                # Look for: input_ddb = filename
-                match = re.search(r'input_ddb\s*=\s*(\S+)', line, re.IGNORECASE)
+                # Look for: latt_ddb_fnames = filename (multibinit DDB variable)
+                match = re.search(r'latt_ddb_fnames\s*=\s*(\S+)', line, re.IGNORECASE)
                 if match:
                     ddb_file = match.group(1).strip()
                 

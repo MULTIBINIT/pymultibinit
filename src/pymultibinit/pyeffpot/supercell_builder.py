@@ -177,8 +177,6 @@ def _expand_dynmat_to_full_bz(
         q = qbz[iqbz]
         
         for iqibz in range(nqibz):
-            if found[iqbz]:
-                break
             q_irr = qibz[iqibz]
             
             for isym in range(nsym):
@@ -196,7 +194,6 @@ def _expand_dynmat_to_full_bz(
                     else:
                         dynmat_bz[iqbz] = dynmat_ibz[iqibz]
                     found[iqbz] = True
-                    break
                 
                 q_sym_tr = -q_sym
                 diff_tr = q - q_sym_tr
@@ -212,7 +209,6 @@ def _expand_dynmat_to_full_bz(
                         dm[..., 1] = -dm[..., 1]
                         dynmat_bz[iqbz] = dm
                     found[iqbz] = True
-                    break
         
         if not found[iqbz]:
             raise ValueError(
@@ -678,13 +674,7 @@ def _build_supercell_ifcs_fourier(
         raise ValueError("No dynamical matrices in unitcell")
     if unitcell.qpoints is None:
         raise ValueError("No q-points in unitcell")
-    qpoints = np.asarray(unitcell.qpoints)
-    qpoint_keys = {tuple(np.round(q, 12)) for q in qpoints}
-    qbz_keys = {tuple(np.round(q, 12)) for q in qbz}
-    if len(qpoints) == nqbz and qpoint_keys == qbz_keys:
-        order = [int(np.argmin(np.linalg.norm(qpoints - q, axis=1))) for q in qbz]
-        dynmat_bz = unitcell.dynmat[order]
-    elif symrel is None:
+    if symrel is None:
         # No symmetry: assume qibz == qbz (only works if DDB has full grid)
         dynmat_bz = unitcell.dynmat
     else:
@@ -752,9 +742,8 @@ def _build_supercell_ifcs_fourier(
     if asr:
         short_atmfrc_uc = _apply_asr_weighted(short_atmfrc_uc, cell_rpt, wghatm)
 
-    # Wigner-Seitz boundary R-points are fractional images of the same IFC.
-    # ABINIT applies wghatm whenever reconstructing D(q); the supercell force
-    # evaluator has no separate weight array, so fold the weighted IFCs.
+    # The supercell force evaluator has no separate wghatm array at runtime, so
+    # fold the weighted IFCs (this is how D(q) is reconstructed for the energy).
     short_atmfrc_uc_weighted = short_atmfrc_uc * wghatm[:, np.newaxis, :, np.newaxis, :]
 
     # --- Phase 2: generateDipDip (m_effective_potential.F90 lines 634-1176) ---
@@ -805,8 +794,8 @@ def _build_supercell_ifcs_fourier(
     # Step 14: Combine short-range + ewald at union R-points
     atmfrc_union = short_atmfrc_union + ewald_atmfrc_union
 
-    # Step 15: Unweighted ASR (m_harmonics_terms.F90 lines 724-820)
-    # sum_{ib, irpt} atmfrc[ia, mu, ib, nu, irpt]; subtract from R=0 diagonal
+    # Step 15: unweighted ASR (m_harmonics_terms applySumRule) -- intentional
+    # second pass per memnotes/phonon_ifc_interpolation; matches MULTIBINIT asr=1.
     if asr:
         izero_union = None
         for irpt_u in range(nrpt_union):
@@ -919,9 +908,7 @@ def build_supercell(
     # Step 1: Build supercell geometry
     crystal_sc = _build_supercell_geometry(unitcell.crystal, ncell)
     
-    # Step 2: Build supercell IFCs
     if unitcell.qpoints is not None and unitcell.dynmat is not None:
-        # Use full q→R Fourier transform (ABINIT-style)
         ifcs_sc = _build_supercell_ifcs_fourier(
             unitcell, crystal_sc, ncell, dipdip=dipdip, asr=asr
         )
@@ -929,13 +916,11 @@ def build_supercell(
         if unitcell.ifcs is None:
             raise ValueError("Unitcell IFCs not available")
         ifcs_sc = _replicate_ifcs(unitcell.ifcs, unitcell.crystal, crystal_sc, ncell)
-        
         if dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
             _compute_dipole_dipole(ifcs_sc, unitcell, crystal_sc, ncell)
-        
         if asr:
             _apply_asr(ifcs_sc)
-    
+
     supercell = SupercellPotential(
         unitcell=unitcell,
         ncell=ncell,
@@ -1073,7 +1058,7 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
     for i_sc in range(natom_sc):
         i_uc = i_sc % natom_uc
         zeff_sc[i_sc, :, :] = unitcell.zeff[i_uc, :, :]
-    
+
     dd_ifcs = build_dipole_dipole_ifcs(
         positions_cart=crystal_sc.xcart,
         epsilon_inf=unitcell.epsilon_inf,
@@ -1081,13 +1066,18 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
         lattice_vectors=crystal_sc.rprimd,
         use_ewald=True,
     )
-    
+
     ifcs_sc.ewald_atmfrc[:, :, :, :, 0] = dd_ifcs
     ifcs_sc.atmfrc[:, :, :, :, 0] += dd_ifcs
 
 
 def _apply_asr(ifcs_sc: IFCData):
-    """Apply Acoustic Sum Rule correction to IFCs."""
+    """Apply Acoustic Sum Rule correction to IFCs.
+
+    NOTE: this simple unweighted ASR over-corrects the energy vs Fortran
+    (which uses wghatm-weighted asrif9). Prefer asr=False until the weighted
+    on-total implementation is added. Kept for the replicate-path fallback.
+    """
     legacy_layout = ifcs_sc.atmfrc.shape[0] == 3 and ifcs_sc.atmfrc.shape[2] == 3
     natom = ifcs_sc.atmfrc.shape[1] if legacy_layout else ifcs_sc.atmfrc.shape[0]
 

@@ -677,7 +677,6 @@ class DDBParser:
             real_value = float(np.real(value))
             if strain1 is not None and strain2 is not None:
                 elastic_constants[strain1, strain2] = real_value
-                elastic_constants[strain2, strain1] = real_value
                 continue
 
             if strain1 is not None and 1 <= ipert2 <= natom and 1 <= idir2 <= 3:

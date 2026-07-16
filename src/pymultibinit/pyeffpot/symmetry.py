@@ -100,8 +100,12 @@ def get_reciprocal_symmetry(symrel: np.ndarray) -> np.ndarray:
     symrec = np.zeros_like(symrel, dtype=float)
     
     for isym in range(nsym):
-        # For integer matrices with det = ±1, this gives integer result.
-        symrec[isym] = np.linalg.inv(symrel[isym])
+        # ABINIT mati3inv returns the transpose of the inverse: symrec = (S^-1)^T.
+        # Callers apply symrec.T to atoms (-> S^-1) and symrec @ q to q-points
+        # (-> S^-T q, the contragredient reciprocal op). Returning just inv(S)
+        # here made build_atom_mapping apply S^-T = S (forward) for cubic ops,
+        # permuting the symmetry-related oxygen sublattice.
+        symrec[isym] = np.linalg.inv(symrel[isym]).T
     
     # Round to integers if close
     symrec_int = np.round(symrec).astype(int)
