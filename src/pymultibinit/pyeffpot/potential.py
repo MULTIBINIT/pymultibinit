@@ -237,6 +237,15 @@ class EffectivePotential:
         # 9. Reference stress (equilibrium pressure of parent structure)
         stress += self._reference_stress
 
+        # 10. ABINIT effective_potential_distributeResidualForces
+        # Mass-weighted projection ensuring total force is exactly zero.
+        typat = self.supercell.crystal_sc.typat.astype(int)
+        amu = self.supercell.unitcell.crystal.amu
+        masses = amu[typat - 1]
+        total_mass = masses.sum()
+        total_force = forces.sum(axis=0)
+        forces -= masses[:, np.newaxis] / total_mass * total_force[np.newaxis, :]
+
         return energy, forces, stress
     
     def _evaluate_strain_coupling(self, strain: np.ndarray,
