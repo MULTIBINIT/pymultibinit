@@ -388,7 +388,7 @@ def ewald_dipole_dipole_for_rpoint(
     
     mask = (gsq > 1e-10)
     # arg1 = (2*pi)^2 * gsq / (4*eta)
-    arg1 = (2.0 * np.pi)**2 * gsq / (4.0 * eta_val)
+    arg1 = gsq / (4.0 * eta_val)
     mask &= (arg1 <= 20)
     
     if np.any(mask):
@@ -408,7 +408,7 @@ def ewald_dipole_dipole_for_rpoint(
         # dyddt[i, mu, j, nu] += factor * phase * G[mu] * G[nu]
         # Vectorized over G: sum_G factors[G] * phases[i,j,G] * G[mu]*G[nu]
         GGs = np.einsum('gi,gj->gij', Gs, Gs)
-        dyddt += np.einsum('g, ijg, gmn -> ijmn', factors, phases, GGs)
+        dyddt += np.einsum('g, ijg, gab -> iajb', factors, phases, GGs)
     
     fact1 = 4.0 * np.pi / volume
     dyddt *= fact1
