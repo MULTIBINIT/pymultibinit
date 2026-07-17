@@ -694,15 +694,16 @@ def _build_supercell_ifcs_fourier(
     
     rprimd = unitcell.rprimd
     gprim = 2 * np.pi * np.linalg.inv(rprimd).T
-    recompute_dipdip = False
 
-    if recompute_dipdip and dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
-        if np.linalg.norm(unitcell.zeff) > 1e-10:
-            from .dipdip import compute_dipdip_dynmats
-            ewald_qpoints = compute_dipdip_dynmats(qbz, unitcell, sumg0=0)
-            for iq, ewald_q in enumerate(ewald_qpoints):
-                dynmat_bz[iq, ..., 0] -= np.real(ewald_q)
-                dynmat_bz[iq, ..., 1] -= np.imag(ewald_q)
+    has_dipdip = (dipdip and unitcell.epsilon_inf is not None
+                  and unitcell.zeff is not None
+                  and np.linalg.norm(unitcell.zeff) > 1e-10)
+    if has_dipdip:
+        from .dipdip import compute_dipdip_dynmat
+        for iq in range(nqbz):
+            dd = compute_dipdip_dynmat(q=qbz[iq], unitcell=unitcell)
+            dynmat_bz[iq, ..., 0] -= np.real(dd)
+            dynmat_bz[iq, ..., 1] -= np.imag(dd)
 
     # Step 5: Canonical coordinate transform + phase shift
     rcan, trans = _canonical_coordinates(unitcell.xred, unitcell.rprimd)
@@ -735,7 +736,6 @@ def _build_supercell_ifcs_fourier(
     wghatm = wghatm[:, :, has_weight]
     nrpt = cell_rpt.shape[1]
 
-    # Step 9: total_atmfrc_uc is already short-range (ewald subtracted in q-space at Step 4)
     short_atmfrc_uc = total_atmfrc_uc
 
     # Step 10: Apply weighted ASR to short-range (asrif9 with asr=1)
@@ -783,13 +783,50 @@ def _build_supercell_ifcs_fourier(
             irpt_uc = uc_rpt_lookup[key]
             short_atmfrc_union[:, :, :, :, irpt_u] = short_atmfrc_uc_weighted[:, :, :, :, irpt_uc]
 
-    # Step 13: Ewald for union R-points (supercell geometry)
     ewald_atmfrc_union = np.zeros((natom_uc, 3, natom_uc, 3, nrpt_union))
-    if recompute_dipdip and dipdip and unitcell.epsilon_inf is not None and unitcell.zeff is not None:
-        if np.linalg.norm(unitcell.zeff) > 1e-10:
-            ewald_atmfrc_union = _compute_dipdip_per_rpoint(
-                unitcell, cell_union, crystal_sc.rprimd
-            )
+    if has_dipdip:
+        from .dipdip import compute_dipdip_dynmat
+        rprimd_sc = crystal_sc.rprimd
+        gprimd_sc = np.linalg.inv(rprimd_sc).T
+        xcart_uc = unitcell.xcart.copy()
+        zeff_uc = unitcell.zeff.copy()
+        eps_uc = unitcell.epsilon_inf
+        natyp = unitcell.crystal.ntypat
+
+        for irpt_u in range(nrpt_union):
+            key = (int(cell_union[0, irpt_u]), int(cell_union[1, irpt_u]), int(cell_union[2, irpt_u]))
+            if key not in uc_rpt_lookup:
+                continue
+            irpt_uc = uc_rpt_lookup[key]
+            i1, i2, i3 = key
+            if not (i1 == 0 and i2 == 0 and i3 == 0):
+                if i1 % ncell[0] == 0 and i2 % ncell[1] == 0 and i3 % ncell[2] == 0:
+                    continue
+            if i1 == 0 and i2 == 0 and i3 == 0:
+                xred = xcart_uc @ gprimd_sc; xred = xred - np.floor(xred)
+                sc_uc = UnitcellData(
+                    crystal=CrystalInfo(natom=natom_uc, ntypat=natyp, rprimd=rprimd_sc,
+                        xred=xred, xcart=xred@rprimd_sc.T, typat=unitcell.crystal.typat,
+                        amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
+                    energy=0.0, epsilon_inf=eps_uc, zeff=zeff_uc)
+                dd = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc_uc))
+            else:
+                R_cart = i1*rprimd[0] + i2*rprimd[1] + i3*rprimd[2]
+                x2 = np.vstack([xcart_uc, xcart_uc + R_cart])
+                z2 = np.vstack([zeff_uc, zeff_uc])
+                xr2 = x2 @ gprimd_sc; xr2 = xr2 - np.floor(xr2)
+                sc2 = UnitcellData(
+                    crystal=CrystalInfo(natom=2*natom_uc, ntypat=natyp, rprimd=rprimd_sc,
+                        xred=xr2, xcart=xr2@rprimd_sc.T,
+                        typat=np.tile(unitcell.crystal.typat, 2),
+                        amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
+                    energy=0.0, epsilon_inf=eps_uc, zeff=z2)
+                dd2 = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc2))
+                dd = dd2[:natom_uc, :, natom_uc:, :]
+            for ia in range(natom_uc):
+                for ib in range(natom_uc):
+                    ewald_atmfrc_union[ia, :, ib, :, irpt_u] = (
+                        dd[ia, :, ib, :] * wghatm[ia, ib, irpt_uc])
 
     # Step 14: Combine short-range + ewald at union R-points
     atmfrc_union = short_atmfrc_union + ewald_atmfrc_union
