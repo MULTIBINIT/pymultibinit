@@ -74,8 +74,14 @@ class EffectivePotential:
         # Precompute harmonic force constant matrix (3*natom_sc, 3*natom_sc)
         natom = supercell.natom_sc
         if supercell.ifcs_sc is not None:
-            phi_sum = supercell.ifcs_sc.atmfrc.sum(axis=4)  # Sum over all range points
+            ifcs = supercell.ifcs_sc
+            phi_sum = ifcs.short_atmfrc.sum(axis=4)
+            if ifcs.ewald_atmfrc is not None and np.any(ifcs.ewald_atmfrc != 0):
+                phi_sum = phi_sum + ifcs.ewald_atmfrc.sum(axis=4)
             self._phi_matrix = phi_sum.reshape(3*natom, 3*natom)
+            row_sums = self._phi_matrix.sum(axis=1)
+            for i in range(3*natom):
+                self._phi_matrix[i, i] -= row_sums[i]
         else:
             self._phi_matrix = None
             
