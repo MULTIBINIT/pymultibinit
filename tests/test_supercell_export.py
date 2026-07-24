@@ -76,8 +76,12 @@ def test_get_supercell_structure_returns_copy():
     pot.set_reference_structure(positions, lattice)
     
     # Get structure
-    positions_out1, lattice_out1, _ = pot.get_supercell_structure()
-    positions_out2, lattice_out2, _ = pot.get_supercell_structure()
+    result1 = pot.get_supercell_structure()
+    result2 = pot.get_supercell_structure()
+    assert result1 is not None
+    assert result2 is not None
+    positions_out1, lattice_out1, _ = result1
+    positions_out2, lattice_out2, _ = result2
     
     # Modify returned arrays
     positions_out1[0, 0] = 999.0
@@ -88,7 +92,9 @@ def test_get_supercell_structure_returns_copy():
     assert lattice_out2[0, 0] == 4.0
     
     # Should not affect internal reference
-    positions_out3, lattice_out3, _ = pot.get_supercell_structure()
+    result3 = pot.get_supercell_structure()
+    assert result3 is not None
+    positions_out3, lattice_out3, _ = result3
     assert positions_out3[0, 0] == 0.0
     assert lattice_out3[0, 0] == 4.0
 
@@ -158,6 +164,30 @@ def test_export_supercell_to_ase_atomic_units():
     
     assert np.allclose(atoms.get_positions(), positions_ang_expected)
     assert np.allclose(atoms.get_cell(), lattice_ang_expected)
+
+
+def test_pyeffpot_export_supercell_to_ase_uses_ase_row_cell_convention():
+    pytest.importorskip("ase", reason="ASE required for this test")
+
+    from pymultibinit import MultibinitPotential
+
+    lattice_internal = np.array([
+        [4.0, 0.2, 0.1],
+        [0.3, 5.0, 0.4],
+        [0.5, 0.6, 6.0],
+    ])
+    scaled_positions = np.array([
+        [0.0, 0.0, 0.0],
+        [0.2, 0.3, 0.4],
+    ])
+    positions = scaled_positions @ lattice_internal.T
+    potential = MultibinitPotential(backend="pyeffpot")
+    potential.set_reference_structure(positions, lattice_internal)
+
+    atoms = potential.export_supercell_to_ase()
+
+    assert np.allclose(atoms.cell.array, lattice_internal.T)
+    assert np.allclose(atoms.get_scaled_positions(), scaled_positions)
 
 
 def test_export_supercell_to_file():
@@ -263,8 +293,10 @@ def test_export_supercell_with_symbol_setting():
     
     try:
         # Read back and check symbols preserved
+        from ase import Atoms
         from ase.io import read
         atoms_read = read(temp_file)
+        assert isinstance(atoms_read, Atoms)
         assert atoms_read.get_chemical_symbols() == ['Ba', 'Ti', 'O', 'O', 'O']
     finally:
         os.unlink(temp_file)
@@ -357,7 +389,9 @@ def test_from_pyeffpot_export_supercell_resolves_bahfo3_symbols():
     pot = MultibinitPotential.from_pyeffpot(ddb_path, ncell=(2, 2, 2))
     atoms = pot.export_supercell_to_ase()
     symbols = atoms.get_chemical_symbols()
-    expected_symbols = {chemical_symbols[int(z)] for z in pot._znucl}
+    znucl = pot._znucl
+    assert znucl is not None
+    expected_symbols = {chemical_symbols[int(z)] for z in znucl}
     assert symbols
     assert 'X' not in symbols
     assert set(symbols) == expected_symbols

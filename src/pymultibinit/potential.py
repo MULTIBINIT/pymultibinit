@@ -148,8 +148,9 @@ class MultibinitPotential:
         return self._ncell
 
     @classmethod
-    def from_abi(cls, abi_file: str, lib_path: Optional[str] = None, 
-                 use_atomic_units: bool = False) -> 'MultibinitPotential':
+    def from_abi(cls, abi_file: str, lib_path: Optional[str] = None,
+                 use_atomic_units: bool = False, *, auto_match_atoms: bool = True,
+                 match_tolerance: float = 0.1) -> 'MultibinitPotential':
         """
         Create potential from a .abi input file.
         
@@ -157,11 +158,18 @@ class MultibinitPotential:
             abi_file: Path to the .abi input file
             lib_path: Path to libabinit.so/dylib (optional)
             use_atomic_units: DEPRECATED - Ignored. Always uses Angstrom/eV.
+            auto_match_atoms: If True, automatically match atoms on first evaluate().
+            match_tolerance: Maximum atom-matching distance in Angstrom.
             
         Returns:
             Initialized MultibinitPotential instance
         """
-        pot = cls(lib_path=lib_path, use_atomic_units=use_atomic_units)
+        pot = cls(
+            lib_path=lib_path,
+            use_atomic_units=use_atomic_units,
+            auto_match_atoms=auto_match_atoms,
+            match_tolerance=match_tolerance,
+        )
         wrapper = pot._ensure_cffi_wrapper()
         wrapper.init_from_abi_file(abi_file)
         pot._initialized = True
@@ -230,10 +238,12 @@ class MultibinitPotential:
     def from_pyeffpot(cls, ddb_file: str, xml_file: Optional[str] = None,
                       ncell: Tuple[int, int, int] = (4, 4, 4),
                       dipdip: bool = True,
-                      asr: bool = True,
-                      auto_match_atoms: bool = True,
-                      match_tolerance: float = 0.1,
-                      reference_stress_ha_bohr3: Optional[np.ndarray] = None) -> 'MultibinitPotential':
+                       asr: bool = True,
+                       auto_match_atoms: bool = True,
+                       match_tolerance: float = 0.1,
+                       reference_stress_ha_bohr3: Optional[np.ndarray] = None,
+                       standalone_compat: bool = False,
+                       standalone_ifc_file: Optional[str] = None) -> 'MultibinitPotential':
         """
         Create potential using pure Python backend (no Fortran dependency).
         
@@ -271,7 +281,10 @@ class MultibinitPotential:
                 coeffs = read_coefficient_xml(xml_file)
                 supercell.anharmonic_coeffs = coeffs
         
-        pot._pyeffpot_potential = EffectivePotential(supercell)
+        pot._pyeffpot_potential = EffectivePotential(
+            supercell, standalone_compat=standalone_compat,
+            standalone_ifc_file=standalone_ifc_file,
+        )
         pot._znucl = np.asarray(unitcell.znucl, dtype=int).copy()
         pot._typat_ref = np.asarray(unitcell.typat, dtype=int).copy()
         pot._typat_super = np.asarray(supercell.crystal_sc.typat, dtype=int).copy()
@@ -597,7 +610,7 @@ class MultibinitPotential:
         if self.backend == 'pyeffpot':
             assert self._pyeffpot_potential is not None
             energy_ha, forces_ha_bohr, stress_ha_bohr3 = self._pyeffpot_potential.evaluate(
-                pos_bohr, lat_bohr
+                pos_bohr, lat_bohr.T
             )
             if stress_ha_bohr3.shape == (3, 3):
                 stress_ha_bohr3 = np.array([
@@ -704,10 +717,11 @@ class MultibinitPotential:
         else:
             symbols = ['X'] * natom  # Fallback: no DDB metadata available
 
+        cell = lattice.T if self.backend == 'pyeffpot' else lattice
         atoms = Atoms(
             symbols=symbols,
             positions=positions,
-            cell=lattice,
+            cell=cell,
             pbc=True
         )
         

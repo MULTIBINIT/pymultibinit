@@ -188,6 +188,36 @@ class TestEffectivePotential:
             f"got {u[0]}"
         )
 
+    def test_standalone_compat_uses_frame_one_shifts_and_raw_displacements(self, simple_supercell, tmp_path):
+        matrix = np.eye(simple_supercell.natom_sc * 3)
+        ifc_file = tmp_path / "standalone_ifcs.npz"
+        np.savez(ifc_file, phi_matrix=matrix)
+        potential = EffectivePotential(
+            simple_supercell, standalone_compat=True, standalone_ifc_file=str(ifc_file)
+        )
+        xcart = potential._reference_positions.copy()
+        lattice = potential._reference_lattice
+        xcart[0] += lattice[0] + np.array([0.1, 0.0, 0.0])
+        np.testing.assert_allclose(
+            potential._compute_displacements(xcart, lattice)[0], [0.1, 0.0, 0.0]
+        )
+        xcart[0] += np.array([0.2, 0.0, 0.0])
+        np.testing.assert_allclose(
+            potential._compute_displacements(xcart, lattice)[0], [0.3, 0.0, 0.0]
+        )
+
+    def test_standalone_compat_keeps_half_cell_shift_unmodified(self, simple_supercell, tmp_path):
+        ifc_file = tmp_path / "standalone_ifcs.npz"
+        np.savez(ifc_file, phi_matrix=np.eye(simple_supercell.natom_sc * 3))
+        potential = EffectivePotential(
+            simple_supercell, standalone_compat=True, standalone_ifc_file=str(ifc_file)
+        )
+        xcart = potential._reference_positions.copy()
+        xcart[0] += 0.5 * potential._reference_lattice[0]
+        np.testing.assert_allclose(
+            potential._compute_displacements(xcart)[0], 0.5 * potential._reference_lattice[0]
+        )
+
     def test_strain_calculation(self, simple_supercell):
         """Test strain calculation."""
         potential = EffectivePotential(simple_supercell)
