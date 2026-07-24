@@ -1,7 +1,0 @@
-{
-  "n_displacements": 30,
-  "min_cm-1": -90.4726721184033,
-  "max_cm-1": 163.45138119019848,
-  "figure": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/training_validation_report/trained_model_phonopy_nosym_bands.png",
-  "data": "/home/hexu/projects/atomchain_dev/pymultibinit/examples/BaTiO3_training/real_training_run/training_validation_report/trained_model_phonopy_nosym_bands_cm1.dat"
-}

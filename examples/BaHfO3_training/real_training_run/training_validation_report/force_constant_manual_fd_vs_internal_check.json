@@ -1,8 +1,0 @@
-{
-  "manual_fc_norm": 7.04867225426129,
-  "internal_phi_norm": 7.048672254264704,
-  "relative_diff_manual_minus_phi": 2.0380564853252165e-12,
-  "relative_diff_manual_plus_phi": 1.999999999999516,
-  "max_abs_diff_manual_minus_phi": 1.1586842596500446e-12,
-  "max_abs_phi": 0.49712327912931875
-}
