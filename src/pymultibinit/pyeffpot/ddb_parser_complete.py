@@ -688,6 +688,11 @@ class DDBParser:
         for alpha in range(6):
             for iatom in range(natom):
                 strain_coupling[alpha, :, iatom] = mat_MP @ strain_coupling_red[alpha, :, iatom]
+        # Apply acoustic sum rule: subtract per-atom mean so Σ_ia g(α,μ,ia) = 0,
+        # matching ABINIT's harmonics_terms_applySumRule (asr=2).
+        for alpha in range(6):
+            for mu in range(3):
+                strain_coupling[alpha, mu, :] -= np.mean(strain_coupling[alpha, mu, :])
         return elastic_constants, strain_coupling
     
     def _infer_ngqpt(self, qpoints: np.ndarray) -> np.ndarray:

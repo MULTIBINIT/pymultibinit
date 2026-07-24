@@ -4,10 +4,162 @@ ASE Calculator interface for MULTIBINIT effective potential.
 Allows seamless integration with the Atomic Simulation Environment (ASE)
 for structure optimization, molecular dynamics, phonon calculations, etc.
 """
+import multiprocessing
+from typing import Optional, Tuple
+
 from ase.calculators.calculator import Calculator, all_changes
 import numpy as np
-from typing import Optional, Tuple, Literal
+
 from .potential import MultibinitPotential
+
+
+def _abi_spawned_worker(
+    connection,
+    abi_file: str,
+    lib_path: Optional[str],
+    auto_match_atoms: bool,
+    match_tolerance: float,
+) -> None:
+    potential = None
+    try:
+        potential = MultibinitPotential.from_abi(
+            abi_file=abi_file,
+            lib_path=lib_path,
+            auto_match_atoms=auto_match_atoms,
+            match_tolerance=match_tolerance,
+        )
+        connection.send(("ok", None))
+        while True:
+            request = connection.recv()
+            if request is None:
+                potential_to_free = potential
+                potential = None
+                potential_to_free.free()
+                return
+            operation = request[0]
+            if operation == "evaluate":
+                result = potential.evaluate(request[1], request[2])
+            elif operation == "reference":
+                result = potential.export_supercell_to_ase()
+            else:
+                raise ValueError(f"unknown spawned potential operation: {operation}")
+            connection.send(("ok", result))
+    except EOFError:
+        return
+    except BaseException as error:
+        try:
+            connection.send(("error", f"{type(error).__name__}: {error}"))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        if potential is not None:
+            potential.free()
+        connection.close()
+
+
+class _SpawnedPotential:
+    def __init__(
+        self,
+        abi_file: str,
+        lib_path: Optional[str],
+        *,
+        auto_match_atoms: bool,
+        match_tolerance: float,
+    ):
+        context = multiprocessing.get_context("spawn")
+        self._connection, child_connection = context.Pipe()
+        self._process = context.Process(
+            target=_abi_spawned_worker,
+            args=(
+                child_connection,
+                abi_file,
+                lib_path,
+                auto_match_atoms,
+                match_tolerance,
+            ),
+        )
+        self._closed = False
+        self._started = False
+        try:
+            self._process.start()
+            self._started = True
+        except BaseException:
+            child_connection.close()
+            self._reap()
+            raise
+        child_connection.close()
+        try:
+            self._receive("initialization")
+        except BaseException:
+            self._reap()
+            raise
+
+    def _worker_exit_error(self, operation: str) -> RuntimeError:
+        return RuntimeError(
+            "Spawned libabinit worker exited during "
+            f"{operation} with exit code {self._process.exitcode}"
+        )
+
+    def _receive(self, operation: str):
+        try:
+            response = self._connection.recv()
+        except EOFError as error:
+            raise self._worker_exit_error(operation) from error
+        if response[0] == "ok":
+            return response[1]
+        if response[0] == "error":
+            raise RuntimeError(
+                f"Spawned libabinit worker failed during {operation}: {response[1]}"
+            )
+        raise RuntimeError(f"unknown spawned potential response: {response!r}")
+
+    def _request(self, request):
+        operation = request[0]
+        if self._closed:
+            raise RuntimeError("Spawned MultibinitPotential is closed")
+        try:
+            if not self._process.is_alive():
+                raise self._worker_exit_error(operation)
+            self._connection.send(request)
+            return self._receive(operation)
+        except (BrokenPipeError, EOFError, OSError) as error:
+            self._reap()
+            raise self._worker_exit_error(operation) from error
+        except BaseException:
+            self._reap()
+            raise
+
+    def evaluate(self, positions: np.ndarray, lattice: np.ndarray):
+        return self._request(("evaluate", positions, lattice))
+
+    def export_supercell_to_ase(self):
+        return self._request(("reference",))
+
+    def _reap(self):
+        self._closed = True
+        try:
+            self._connection.close()
+        except OSError:
+            pass
+        if self._started:
+            self._process.join(5)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(5)
+                if self._process.is_alive():
+                    self._process.kill()
+                    self._process.join(5)
+
+    def free(self):
+        if self._closed:
+            return
+        try:
+            if self._process.is_alive():
+                self._connection.send(None)
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        finally:
+            self._reap()
 
 
 class MultibinitCalculator(Calculator):
@@ -56,7 +208,7 @@ class MultibinitCalculator(Calculator):
     
     implemented_properties = ['energy', 'forces', 'stress']
     
-    def __init__(self, potential: MultibinitPotential, **kwargs):
+    def __init__(self, potential: MultibinitPotential | _SpawnedPotential, **kwargs):
         """
         Initialize the calculator with an existing potential.
         
@@ -66,16 +218,21 @@ class MultibinitCalculator(Calculator):
         """
         super().__init__(**kwargs)
         self.potential = potential
+        self._closed = False
     
     @classmethod
     def from_abi(cls, abi_file: str, lib_path: Optional[str] = None,
-                **kwargs) -> 'MultibinitCalculator':
+                 *, auto_match_atoms: bool = True, match_tolerance: float = 0.1,
+                 **kwargs) -> 'MultibinitCalculator':
         """
         Create calculator from a .abi input file.
         
         Args:
             abi_file: Path to the .abi input file
             lib_path: Path to libabinit.so/dylib (optional)
+            auto_match_atoms: Automatically reorder input atoms to match the
+                MULTIBINIT reference on the first evaluation.
+            match_tolerance: Atom-matching tolerance in Angstrom.
             **kwargs: Additional arguments for ASE Calculator
             
         Returns:
@@ -83,7 +240,28 @@ class MultibinitCalculator(Calculator):
         """
         potential = MultibinitPotential.from_abi(
             abi_file=abi_file,
-            lib_path=lib_path
+            lib_path=lib_path,
+            auto_match_atoms=auto_match_atoms,
+            match_tolerance=match_tolerance,
+        )
+        return cls(potential=potential, **kwargs)
+
+    @classmethod
+    def from_abi_spawned(
+        cls,
+        abi_file: str,
+        lib_path: Optional[str] = None,
+        *,
+        auto_match_atoms: bool = True,
+        match_tolerance: float = 0.1,
+        **kwargs,
+    ) -> 'MultibinitCalculator':
+        """Create a CFFI calculator whose native state lives in a child process."""
+        potential = _SpawnedPotential(
+            abi_file,
+            lib_path,
+            auto_match_atoms=auto_match_atoms,
+            match_tolerance=match_tolerance,
         )
         return cls(potential=potential, **kwargs)
     
@@ -228,7 +406,23 @@ class MultibinitCalculator(Calculator):
         """
         potential = MultibinitPotential.from_config_file(config_file)
         return cls(potential=potential, **kwargs)
-    
+
+    def get_reference_atoms(self):
+        return self.potential.export_supercell_to_ase()
+
+    def close(self):
+        if not self._closed:
+            self.potential.free()
+            self.results.clear()
+            self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
         """
         Calculate properties for the given atoms object.
@@ -238,7 +432,13 @@ class MultibinitCalculator(Calculator):
             properties: List of properties to calculate
             system_changes: List of changed properties since last calculation
         """
+        if self._closed:
+            raise RuntimeError("MultibinitCalculator is closed")
+
         super().calculate(atoms, properties, system_changes)
+
+        if self.atoms is None:
+            raise RuntimeError("MultibinitCalculator requires ASE atoms")
         
         # Get positions and cell from atoms (in Angstrom)
         positions = self.atoms.get_positions()  # (natom, 3) in Angstrom
@@ -251,36 +451,5 @@ class MultibinitCalculator(Calculator):
         self.results['energy'] = energy  # eV
         self.results['forces'] = forces  # eV/Angstrom
         
-        # ASE stress convention:
-        # ASE Calculator.get_stress() returns: [xx, yy, zz, yz, xz, xy]
-        # Sign convention:
-        # ASE standard: positive = tension (expanding the cell lowers energy? No)
-        # ASE optimization algorithms (UnitCellFilter) move in direction of -gradient.
-        # Gradient w.r.t strain is V * stress.
-        # If stress > 0 (tension), dE/d\epsilon > 0. Increasing epsilon (expanding) increases energy.
-        # To minimize energy, we should decrease epsilon (contract).
-        # So UnitCellFilter should contract the cell if stress is positive.
-        #
-        # However, some DFT codes output stress with pressure convention (P = -sigma).
-        # If ABINIT returns stress where positive = tension, then ASE expects it as is.
-        #
-        # Let's check ABINIT convention in potential.py:
-        # "stress tensor (Hartree/Bohr^3) - Voigt notation"
-        # If ABINIT uses thermodynamic stress (dE/de), then it matches ASE definition.
-        #
-        # Experimentally, if relaxation diverges (explodes), try flipping the sign.
-        # Original code had: self.results['stress'] = -stress
-        # This implies ABINIT stress was treated as Pressure (positive = compression).
-        # If ABINIT stress is actually Tensile (positive = tension), then -stress would mean
-        # negative tension (compression), so optimizer would expand to relieve it.
-        # If it was already tensile, expanding makes it worse -> divergence!
-        #
-        # So if divergence occurs with -stress, it means we should probably use +stress.
-        
+        # ASE stress order is [xx, yy, zz, yz, xz, xy] in eV/Angstrom^3.
         self.results['stress'] = stress  # eV/Angstrom^3
-    
-    def __del__(self):
-        """Destructor - ensure cleanup."""
-        if hasattr(self, 'potential'):
-            #self.potential.free()
-            pass

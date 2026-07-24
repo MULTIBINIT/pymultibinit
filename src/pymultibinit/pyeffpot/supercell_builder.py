@@ -742,8 +742,7 @@ def _build_supercell_ifcs_fourier(
     if asr:
         short_atmfrc_uc = _apply_asr_weighted(short_atmfrc_uc, cell_rpt, wghatm)
 
-    # The supercell force evaluator has no separate wghatm array at runtime, so
-    # fold the weighted IFCs (this is how D(q) is reconstructed for the energy).
+    # Fold wghatm into the IFC values
     short_atmfrc_uc_weighted = short_atmfrc_uc * wghatm[:, np.newaxis, :, np.newaxis, :]
 
     # --- Phase 2: generateDipDip (m_effective_potential.F90 lines 634-1176) ---
@@ -785,12 +784,44 @@ def _build_supercell_ifcs_fourier(
 
     ewald_atmfrc_union = np.zeros((natom_uc, 3, natom_uc, 3, nrpt_union))
 
-    # Step 14: ASR and replication use short-range only; ewald is computed
-    # separately at supercell R-points after replication
+    if has_dipdip:
+        from .dipdip import compute_dipdip_dynmat
+        rprimd_sc = crystal_sc.rprimd
+        gprimd_sc = np.linalg.inv(rprimd_sc).T
+        xcart_uc = unitcell.xcart
+        zeff_uc = unitcell.zeff
+        eps_uc = unitcell.epsilon_inf
+        natyp = unitcell.crystal.ntypat
+
+        for irpt_u in range(nrpt_union):
+            i1 = int(cell_union[0, irpt_u]); i2 = int(cell_union[1, irpt_u]); i3 = int(cell_union[2, irpt_u])
+            if not (sc_min[0] <= i1 <= sc_max[0] and sc_min[1] <= i2 <= sc_max[1] and sc_min[2] <= i3 <= sc_max[2]):
+                continue
+            if i1 == 0 and i2 == 0 and i3 == 0:
+                xred = xcart_uc @ gprimd_sc; xred = xred - np.floor(xred)
+                sc_uc = UnitcellData(
+                    crystal=CrystalInfo(natom=natom_uc, ntypat=natyp, rprimd=rprimd_sc,
+                        xred=xred, xcart=xred@rprimd_sc.T, typat=unitcell.crystal.typat,
+                        amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
+                    energy=0.0, epsilon_inf=eps_uc, zeff=zeff_uc)
+                dd = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc_uc))
+            else:
+                R_cart = i1*rprimd[0] + i2*rprimd[1] + i3*rprimd[2]
+                x2 = np.vstack([xcart_uc, xcart_uc + R_cart])
+                z2 = np.vstack([zeff_uc, zeff_uc])
+                xr2 = x2 @ gprimd_sc; xr2 = xr2 - np.floor(xr2)
+                sc2 = UnitcellData(
+                    crystal=CrystalInfo(natom=2*natom_uc, ntypat=natyp, rprimd=rprimd_sc,
+                        xred=xr2, xcart=xr2@rprimd_sc.T,
+                        typat=np.tile(unitcell.crystal.typat, 2),
+                        amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
+                    energy=0.0, epsilon_inf=eps_uc, zeff=z2)
+                dd2 = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc2))
+                dd = dd2[:natom_uc, :, natom_uc:, :]
+            ewald_atmfrc_union[:, :, :, :, irpt_u] = dd
+
     atmfrc_union = short_atmfrc_union
 
-    # Step 15: unweighted ASR (m_harmonics_terms applySumRule) -- intentional
-    # second pass per memnotes/phonon_ifc_interpolation; matches MULTIBINIT asr=1.
     if asr:
         izero_union = None
         for irpt_u in range(nrpt_union):
@@ -857,50 +888,6 @@ def _build_supercell_ifcs_fourier(
                             atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += ifc_u
                             short_atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += short_u
                             ewald_atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += ewald_u
-
-    if has_dipdip:
-        from .dipdip import compute_dipdip_dynmat
-        rprimd_sc = crystal_sc.rprimd
-        gprimd_sc = np.linalg.inv(rprimd_sc).T
-        xcart_uc = unitcell.xcart
-        zeff_uc = unitcell.zeff
-        eps_uc = unitcell.epsilon_inf
-        natyp = unitcell.crystal.ntypat
-        nx, ny, nz = ncell
-
-        for irpt_sc in range(nrpt_sc):
-            i1 = int(cell_sc[0, irpt_sc]); i2 = int(cell_sc[1, irpt_sc]); i3 = int(cell_sc[2, irpt_sc])
-            if i1 == 0 and i2 == 0 and i3 == 0:
-                xred = xcart_uc @ gprimd_sc; xred = xred - np.floor(xred)
-                sc_uc = UnitcellData(
-                    crystal=CrystalInfo(natom=natom_uc, ntypat=natyp, rprimd=rprimd_sc,
-                        xred=xred, xcart=xred@rprimd_sc.T, typat=unitcell.crystal.typat,
-                        amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
-                    energy=0.0, epsilon_inf=eps_uc, zeff=zeff_uc)
-                dd = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc_uc))
-            else:
-                R_cart = i1*rprimd[0] + i2*rprimd[1] + i3*rprimd[2]
-                x2 = np.vstack([xcart_uc, xcart_uc + R_cart])
-                z2 = np.vstack([zeff_uc, zeff_uc])
-                xr2 = x2 @ gprimd_sc; xr2 = xr2 - np.floor(xr2)
-                sc2 = UnitcellData(
-                    crystal=CrystalInfo(natom=2*natom_uc, ntypat=natyp, rprimd=rprimd_sc,
-                        xred=xr2, xcart=xr2@rprimd_sc.T,
-                        typat=np.tile(unitcell.crystal.typat, 2),
-                        amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
-                    energy=0.0, epsilon_inf=eps_uc, zeff=z2)
-                dd2 = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc2))
-                dd = dd2[:natom_uc, :, natom_uc:, :]
-            for ix in range(nx):
-                for iy in range(ny):
-                    for iz in range(nz):
-                        for ia_uc in range(natom_uc):
-                            for ib_uc in range(natom_uc):
-                                i_sc = _supercell_atom_index(ia_uc, ix, iy, iz, ncell, natom_uc)
-                                jx = (ix + i1) % nx; jy = (iy + i2) % ny; jz = (iz + i3) % nz
-                                j_sc = _supercell_atom_index(ib_uc, jx, jy, jz, ncell, natom_uc)
-                                ewald_atmfrc_sc[i_sc, :, j_sc, :, irpt_sc] += dd[ia_uc, :, ib_uc, :]
-            atmfrc_sc[:, :, :, :, irpt_sc] += ewald_atmfrc_sc[:, :, :, :, irpt_sc]
 
     return IFCData(
         nrpt=nrpt_sc,

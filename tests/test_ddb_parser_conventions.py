@@ -108,4 +108,5 @@ def test_parser_extracts_gamma_elastic_and_internal_strain_terms(tmp_path):
     assert unitcell.elastic_constants[0, 0] == 2.0
     assert unitcell.elastic_constants[1, 5] == 0.5
     assert unitcell.elastic_constants[5, 1] == 0.0
-    assert unitcell.strain_coupling[0, 1, 0] == 4.0
+    assert unitcell.strain_coupling[0, 1, 0] == 0.0
+    assert np.allclose(unitcell.strain_coupling.sum(axis=2), 0.0)

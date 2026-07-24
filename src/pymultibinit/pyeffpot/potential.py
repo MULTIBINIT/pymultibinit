@@ -61,11 +61,14 @@ class EffectivePotential:
     >>> energy, forces, stress = potential.evaluate(xcart, rprimd)
     """
     
-    def __init__(self, supercell: SupercellPotential):
+    def __init__(self, supercell: SupercellPotential, standalone_compat: bool = False,
+                 standalone_ifc_file: Optional[str] = None):
         """Initialize effective potential."""
         self.supercell = supercell
         self._reference_positions = supercell.crystal_sc.xcart.copy()
         self._reference_lattice = supercell.crystal_sc.rprimd.copy()
+        self._standalone_compat = standalone_compat
+        self._standalone_frame_shifts: Optional[np.ndarray] = None
 
         self._phi_matrix: Optional[np.ndarray] = None
         self._phonon_strain_matrices: Optional[List[Optional[np.ndarray]]] = None
@@ -73,15 +76,20 @@ class EffectivePotential:
         
         # Precompute harmonic force constant matrix (3*natom_sc, 3*natom_sc)
         natom = supercell.natom_sc
-        if supercell.ifcs_sc is not None:
+        if standalone_compat:
+            if standalone_ifc_file is None:
+                raise ValueError("standalone_ifc_file is required when standalone_compat=True")
+            with np.load(standalone_ifc_file) as data:
+                self._phi_matrix = np.array(data["phi_matrix"], dtype=float, copy=True)
+            expected_shape = (3 * natom, 3 * natom)
+            if self._phi_matrix.shape != expected_shape:
+                raise ValueError(
+                    f"standalone phi_matrix has shape {self._phi_matrix.shape}, expected {expected_shape}"
+                )
+        elif supercell.ifcs_sc is not None:
             ifcs = supercell.ifcs_sc
-            phi_sum = ifcs.short_atmfrc.sum(axis=4)
-            if ifcs.ewald_atmfrc is not None and np.any(ifcs.ewald_atmfrc != 0):
-                phi_sum = phi_sum + ifcs.ewald_atmfrc.sum(axis=4)
+            phi_sum = ifcs.atmfrc.sum(axis=4)
             self._phi_matrix = phi_sum.reshape(3*natom, 3*natom)
-            row_sums = self._phi_matrix.sum(axis=1)
-            for i in range(3*natom):
-                self._phi_matrix[i, i] -= row_sums[i]
         else:
             self._phi_matrix = None
             
@@ -124,9 +132,11 @@ class EffectivePotential:
     @classmethod
     def from_files(cls, ddb_file: str, xml_file: Optional[str] = None,
                    ncell: Tuple[int, int, int] = (4, 4, 4),
-                   dipdip: bool = True,
-                   asr: bool = True,
-                   reference_stress: Optional[np.ndarray] = None) -> EffectivePotential:
+                    dipdip: bool = True,
+                    asr: bool = True,
+                    reference_stress: Optional[np.ndarray] = None,
+                    standalone_compat: bool = False,
+                    standalone_ifc_file: Optional[str] = None) -> EffectivePotential:
         """
         Create EffectivePotential from DDB and XML files.
 
@@ -154,7 +164,8 @@ class EffectivePotential:
             coeffs = read_coefficient_xml(xml_file)
             supercell.anharmonic_coeffs = coeffs
 
-        pot = cls(supercell)
+        pot = cls(supercell, standalone_compat=standalone_compat,
+                  standalone_ifc_file=standalone_ifc_file)
         if reference_stress is not None:
             pot.set_reference_stress(reference_stress)
         return pot
@@ -338,6 +349,15 @@ class EffectivePotential:
         """
         if rprimd is None:
             rprimd = self._reference_lattice
+        if self._standalone_compat:
+            current_xred = xcart @ np.linalg.inv(rprimd).T
+            reference_xred = self.supercell.crystal_sc.xred
+            if self._standalone_frame_shifts is None:
+                delta = current_xred - reference_xred
+                self._standalone_frame_shifts = np.where(
+                    delta > 0.5, -1.0, np.where(delta < -0.5, 1.0, 0.0)
+                )
+            return (current_xred + self._standalone_frame_shifts - reference_xred) @ rprimd.T
         reference_xred = self.supercell.crystal_sc.xred
         reference_positions_in_current_cell = reference_xred @ rprimd.T
         raw_disp = xcart - reference_positions_in_current_cell

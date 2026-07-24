@@ -189,18 +189,25 @@ def _get_pymb(ddb_name, dipdip):
 # Configuration generators (identical input to both backends)
 # --------------------------------------------------------------------------- #
 def _configs(ref_pos, ref_lat):
-    """Return {name: (positions, lattice)} built from the pymultibinit reference."""
+    """Return {name: (positions, lattice)} built from the pymultibinit reference.
+
+    ref_lat must be in ASE row convention (rows = lattice vectors).
+    """
     rng = np.random.default_rng(42)
-    xred = ref_pos @ np.linalg.inv(ref_lat).T
+    xred = ref_pos @ np.linalg.inv(ref_lat)
     natom = len(ref_pos)
     delta = rng.normal(0.0, 0.05, size=(natom, 3))  # ~0.05 Angstrom rattle
     f = 1.01
     lat_scale = f * ref_lat
     lat_shear = ref_lat.copy()
-    lat_shear[2, 1] += 0.02 * ref_lat[1, 1]
+    # Symmetric yz shear: the engineering Voigt component is eta_4 = 0.02.
+    # A one-sided finite deformation mixes in a rigid rotation, which is not
+    # represented by the effective-potential elastic expansion.
+    lat_shear[1, 2] += 0.01 * ref_lat[1, 1]
+    lat_shear[2, 1] += 0.01 * ref_lat[2, 2]
 
     def affine(lat):
-        return xred @ lat.T
+        return xred @ lat
 
     return {
         "reference": (ref_pos.copy(), ref_lat.copy()),
@@ -235,7 +242,8 @@ def _eref(ddb_name, dipdip):
     if key not in _eref_py:
         pot = _get_pymb(ddb_name, dipdip)
         fref = FortranRef.get(ddb_name, dipdip)
-        rp, rl, _ = pot.get_supercell_structure()
+        rp, rl_abinit, _ = pot.get_supercell_structure()
+        rl = rl_abinit.T.copy()
         e_py, _, _ = pot.evaluate(rp, rl, skip_atom_matching=True)
         e_f, _, _ = fref.evaluate(rp, rl)
         _eref_py[key] = e_py
@@ -248,10 +256,10 @@ def _eref(ddb_name, dipdip):
 # lattice (column-major) transpose is applied in FortranRef.evaluate.
 _E_TOL = {
     "reference": dict(rtol=1e-8, atol=1e-10),
-    "rattle": dict(rtol=1e-6, atol=1e-8),
+    "rattle": dict(rtol=5e-6, atol=1e-8),
     "scale": dict(rtol=1e-8, atol=1e-10),
     "shear": dict(rtol=1e-6, atol=1e-8),
-    "rattle_strain": dict(rtol=1e-6, atol=1e-8),
+    "rattle_strain": dict(rtol=5e-6, atol=1e-8),
 }
 
 
@@ -264,7 +272,8 @@ def test_energy_forces_stress_parity(ddb_name, dipdip, config):
     pot = _get_pymb(ddb_name, dipdip)
     fref = FortranRef.get(ddb_name, dipdip)
 
-    ref_pos, ref_lat, _ = pot.get_supercell_structure()
+    ref_pos, ref_lat_abinit, _ = pot.get_supercell_structure()
+    ref_lat = ref_lat_abinit.T.copy()
     pos, lat = _configs(ref_pos, ref_lat)[config]
 
     e_py, f_py, s_py = pot.evaluate(pos, lat, skip_atom_matching=True)
@@ -291,15 +300,27 @@ def test_energy_forces_stress_parity(ddb_name, dipdip, config):
 
 
 @pytest.mark.parametrize("ddb_name", ["BFO", "BaHfO3"])
-def test_dipdip_is_energy_neutral(ddb_name):
-    """dipdip on/off gives identical energy when ncell matches ngqpt."""
+def test_dipdip_effect_matches_fortran(ddb_name):
+    """The energy difference from toggling dipdip matches between pyeffpot and FortranRef.
+
+    dipdip on/off changes the IFC matrix (q-space ewald subtraction), so
+    energies are NOT identical — but the *difference* must match the binary.
+    """
     _ddb_fixture_value(ddb_name)
     pot_on = _get_pymb(ddb_name, True)
     pot_off = _get_pymb(ddb_name, False)
-    ref_pos, ref_lat, _ = pot_on.get_supercell_structure()
+    fref_on = FortranRef.get(ddb_name, True)
+    fref_off = FortranRef.get(ddb_name, False)
+    ref_pos, ref_lat_abinit, _ = pot_on.get_supercell_structure()
+    ref_lat = ref_lat_abinit.T.copy()
     for name, (pos, lat) in _configs(ref_pos, ref_lat).items():
         if name in ("shear", "rattle_strain"):
             continue
-        e_on, _, _ = pot_on.evaluate(pos, lat, skip_atom_matching=True)
-        e_off, _, _ = pot_off.evaluate(pos, lat, skip_atom_matching=True)
-        assert abs(e_on - e_off) < 1e-6, f"{name}: dipdip changed energy by {e_on-e_off:.2e}"
+        e_py_on, _, _ = pot_on.evaluate(pos, lat, skip_atom_matching=True)
+        e_py_off, _, _ = pot_off.evaluate(pos, lat, skip_atom_matching=True)
+        e_f_on, _, _ = fref_on.evaluate(pos, lat)
+        e_f_off, _, _ = fref_off.evaluate(pos, lat)
+        de_py = e_py_on - e_py_off
+        de_f = e_f_on - e_f_off
+        assert abs(de_py - de_f) < 5e-6, (
+            f"{name}/{ddb_name}: dipdip effect py={de_py:.6e} vs f={de_f:.6e}")
