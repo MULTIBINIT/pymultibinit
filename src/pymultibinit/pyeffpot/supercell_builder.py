@@ -14,9 +14,9 @@ References:
 from typing import Tuple, List, Optional
 import numpy as np
 from .datastructures import (
-    UnitcellData, 
-    SupercellPotential, 
-    CrystalInfo, 
+    UnitcellData,
+    SupercellPotential,
+    CrystalInfo,
     IFCData
 )
 from .dipdip import build_dipole_dipole_ifcs
@@ -37,14 +37,14 @@ def _find_bound_supercell(ncell: int) -> Tuple[int, int]:
 def _generate_supercell_rpoints(ncell: Tuple[int, int, int]) -> np.ndarray:
     """
     Generate R-point grid for supercell.
-    
+
     Returns cell indices (i1, i2, i3) for all R-points in supercell.
-    
+
     Parameters
     ----------
     ncell : Tuple[int, int, int]
         Supercell dimensions
-        
+
     Returns
     -------
     cell : (3, nrpt) array
@@ -53,13 +53,13 @@ def _generate_supercell_rpoints(ncell: Tuple[int, int, int]) -> np.ndarray:
     min1, max1 = _find_bound_supercell(ncell[0])
     min2, max2 = _find_bound_supercell(ncell[1])
     min3, max3 = _find_bound_supercell(ncell[2])
-    
+
     rpoints = []
     for i1 in range(min1, max1 + 1):
         for i2 in range(min2, max2 + 1):
             for i3 in range(min3, max3 + 1):
                 rpoints.append([i1, i2, i3])
-    
+
     return np.array(rpoints, dtype=int).T  # Shape: (3, nrpt)
 
 
@@ -72,17 +72,17 @@ def _supercell_atom_index(atom_uc: int, ix: int, iy: int, iz: int, ncell: Tuple[
 def _bigbx9_rpoints(ngqpt: np.ndarray, nqshft: int = 1) -> np.ndarray:
     """
     Generate R-point grid using ABINIT bigbx9 algorithm (brav=1, simple cubic).
-    
+
     For brav=1: lim = (ngqpt + 1) * lqshft + buffer, buffer=1
     nrpt = (2*lim+1)^3
-    
+
     Parameters
     ----------
     ngqpt : (3,) array
         q-point grid dimensions
     nqshft : int
         Number of q-grid shifts (1 for unshifted grid)
-        
+
     Returns
     -------
     cell : (3, nrpt) array
@@ -90,15 +90,15 @@ def _bigbx9_rpoints(ngqpt: np.ndarray, nqshft: int = 1) -> np.ndarray:
     """
     buffer = 1
     lqshft = 1 if nqshft == 1 else 2
-    
+
     lim = [(int(ngqpt[i]) + 1) * lqshft + buffer for i in range(3)]
-    
+
     rpoints = []
     for r1 in range(-lim[0], lim[0] + 1):
         for r2 in range(-lim[1], lim[1] + 1):
             for r3 in range(-lim[2], lim[2] + 1):
                 rpoints.append([r1, r2, r3])
-    
+
     return np.array(rpoints, dtype=int).T  # Shape: (3, nrpt)
 
 
@@ -106,10 +106,10 @@ def _generate_full_bz_qpoints(ngqpt: np.ndarray, nqshft: int = 1,
                                q1shft: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Generate all q-points in the full Brillouin zone (smpbz for brav=1).
-    
+
     For a Gamma-centered grid with nqshft=1, q1shft=(0,0,0):
     qbz = {(i1/N1, i2/N2, i3/N3) : 0 <= ij < Nj}
-    
+
     Parameters
     ----------
     ngqpt : (3,) array
@@ -118,7 +118,7 @@ def _generate_full_bz_qpoints(ngqpt: np.ndarray, nqshft: int = 1,
         Number of q-shifts
     q1shft : (nqshft, 3) array or None
         q-shifts (default: (0,0,0))
-        
+
     Returns
     -------
     qbz : (nqbz, 3) array
@@ -126,7 +126,7 @@ def _generate_full_bz_qpoints(ngqpt: np.ndarray, nqshft: int = 1,
     """
     if q1shft is None:
         q1shft = np.zeros((max(nqshft, 1), 3))
-    
+
     n1, n2, n3 = int(ngqpt[0]), int(ngqpt[1]), int(ngqpt[2])
     qbz = []
     for ishft in range(nqshft):
@@ -140,7 +140,7 @@ def _generate_full_bz_qpoints(ngqpt: np.ndarray, nqshft: int = 1,
                     # Fold to [-0.5, 0.5)
                     q = q - np.round(q)
                     qbz.append(q)
-    
+
     return np.array(qbz)  # (nqbz, 3)
 
 
@@ -159,30 +159,30 @@ def _expand_dynmat_to_full_bz(
     natom = dynmat_ibz.shape[1]
     nsym = len(symrel)
     tol = 2e-8
-    
+
     dynmat_bz = np.zeros((nqbz, natom, 3, natom, 3, 2))
     found = np.zeros(nqbz, dtype=bool)
-    
+
     do_rotation = use_rotation and tnons is not None
     if do_rotation:
         indsym = build_atom_mapping(xred, symrel, tnons, tol=1e-6)
     else:
         indsym = None
-    
+
     symrec = np.zeros_like(symrel, dtype=float)
     for isym in range(nsym):
         symrec[isym] = np.linalg.inv(symrel[isym]).T
-    
+
     for iqbz in range(nqbz):
         q = qbz[iqbz]
-        
+
         for iqibz in range(nqibz):
             q_irr = qibz[iqibz]
-            
+
             for isym in range(nsym):
                 S_rec = symrec[isym]
                 q_sym = S_rec @ q_irr
-                
+
                 diff = q - q_sym
                 diff -= np.round(diff)
                 if np.max(np.abs(diff)) < tol:
@@ -194,7 +194,7 @@ def _expand_dynmat_to_full_bz(
                     else:
                         dynmat_bz[iqbz] = dynmat_ibz[iqibz]
                     found[iqbz] = True
-                
+
                 q_sym_tr = -q_sym
                 diff_tr = q - q_sym_tr
                 diff_tr -= np.round(diff_tr)
@@ -209,13 +209,13 @@ def _expand_dynmat_to_full_bz(
                         dm[..., 1] = -dm[..., 1]
                         dynmat_bz[iqbz] = dm
                     found[iqbz] = True
-        
+
         if not found[iqbz]:
             raise ValueError(
                 f"Could not find irreducible q-point for q={q}. "
                 f"Check symmetry operations or q-point grid."
             )
-    
+
     return dynmat_bz
 
 
@@ -227,16 +227,16 @@ def _wrap_to_pmhalf(x: np.ndarray) -> np.ndarray:
 def _canonical_coordinates(xred: np.ndarray, rprim: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
     Transform atomic positions to canonical coordinates.
-    
+
     Wraps positions to Wigner-Seitz cell and computes translation vectors.
-    
+
     Parameters
     ----------
     xred : (natom, 3) array
         Reduced coordinates
     rprim : (3, 3) array
         Primitive lattice vectors
-        
+
     Returns
     -------
     rcan : (natom, 3) array
@@ -247,17 +247,17 @@ def _canonical_coordinates(xred: np.ndarray, rprim: np.ndarray) -> Tuple[np.ndar
     natom = len(xred)
     rcan = np.zeros((natom, 3))
     trans = np.zeros((natom, 3))
-    
+
     for iat in range(natom):
         # Wrap to [-0.5, 0.5)
         rok = _wrap_to_pmhalf(xred[iat])
-        
+
         # Canonical position in Cartesian
         rcan[iat] = rok @ rprim.T
-        
+
         # Translation from original to canonical
         trans[iat] = (xred[iat] - rok) @ rprim.T
-    
+
     return rcan, trans
 
 
@@ -270,13 +270,13 @@ def _apply_phase_shift(
 ) -> np.ndarray:
     """
     Apply phase shift to dynamical matrices.
-    
+
     ABINIT dymfz9 phase shift between usual and canonical atomic coordinates.
 
     option=1 transforms usual coordinates to normalized canonical coordinates
     before q->R Fourier transform and uses a negative phase. option=2 restores
     usual coordinates after R->q Fourier transform and uses a positive phase.
-    
+
     Parameters
     ----------
     dynmat : (nqpt, natom, 3, natom, 3, 2) array
@@ -289,7 +289,7 @@ def _apply_phase_shift(
         Translation vectors from canonical transformation
     option : int
         ABINIT dymfz9 option: 1 for q->R preparation, 2 for R->q restoration.
-        
+
     Returns
     -------
     dynmat_shifted : (nqpt, natom, 3, natom, 3, 2) array
@@ -305,7 +305,7 @@ def _apply_phase_shift(
         raise ValueError("option must be 1 or 2")
 
     # phase_arg[q, a, b] = kk[q] . diff_trans[a, b]
-    # Here kk is 2pi*q_cart, and diff_trans is R_cart. 
+    # Here kk is 2pi*q_cart, and diff_trans is R_cart.
     # So phase_arg is already the full phase (dimensionless, 2pi-scaled).
     phase_arg = np.einsum('qi,abi->qab', kk, diff_trans)  # (nqpt, natom, natom)
     if option == 1:
@@ -335,14 +335,14 @@ def _ftifc_q2r(
 ) -> np.ndarray:
     """
     Fourier transform from q-space to R-space (Pure Lattice).
-    
+
     Phi(R) = (1/N_q) * Sum_q exp(-i*2*pi*q*R) * D_shifted(q)
     """
     nqpt = len(qpoints)
     nrpt = cell.shape[1]
 
     # phase_arg[q, R] = q . cell[R]
-    phase_arg = qpoints @ cell  # (nqpt, nrpt) 
+    phase_arg = qpoints @ cell  # (nqpt, nrpt)
     phase_c = np.exp(-2j * np.pi * phase_arg)
 
     # Use complex dynmat directly
@@ -350,8 +350,8 @@ def _ftifc_q2r(
         D_c = dynmat
     else:
         D_c = dynmat[..., 0] + 1j * dynmat[..., 1] # (nqpt, natom, 3, natom, 3)
-    
-    # Sum over q: 
+
+    # Sum over q:
     # phase_c: (q, r), D_c: (q, ia, mu, ib, nu)
     # result: (ia, mu, ib, nu, r)
     atmfrc_c = np.einsum('qr,qijkl->ijklr', phase_c, D_c) / nqpt
@@ -556,12 +556,12 @@ def _compute_dipdip_per_rpoint(
 ) -> np.ndarray:
     """
     Compute dipole-dipole IFCs for each R-point (unitcell basis).
-    
+
     Matches ABINIT's effective_potential_generateDipDip:
     - Uses SUPERCELL geometry for Ewald summation
     - For R=(0,0,0): dipole-dipole within reference cell
     - For R≠(0,0,0): dipole-dipole between reference cell and shifted cell
-    
+
     Parameters
     ----------
     unitcell : UnitcellData
@@ -570,32 +570,32 @@ def _compute_dipdip_per_rpoint(
         Cell indices for each R-point
     rprimd_sc : (3, 3) array
         Supercell lattice vectors (for Ewald summation)
-        
+
     Returns
     -------
     ewald_atmfrc : (natom_uc, 3, natom_uc, 3, nrpt) array
         Dipole-dipole IFCs for each R-point (unitcell basis)
     """
     from .dipdip import ewald_dipole_dipole_for_rpoint
-    
+
     natom_uc = unitcell.natom
     nrpt = cell.shape[1]
-    
+
     epsilon_inf = unitcell.epsilon_inf
     zeff = unitcell.zeff
     rprimd_uc = unitcell.rprimd
     xcart_uc = unitcell.xcart
-    
+
     if epsilon_inf is None or zeff is None:
         return np.zeros((natom_uc, 3, natom_uc, 3, nrpt))
-    
+
     ewald_atmfrc = np.zeros((natom_uc, 3, natom_uc, 3, nrpt))
-    
+
     volume_sc = np.abs(np.linalg.det(rprimd_sc))
-    
+
     for irpt in range(nrpt):
         cell_shift = cell[:, irpt]
-        
+
         if cell_shift[0] == 0 and cell_shift[1] == 0 and cell_shift[2] == 0:
             ewald_atmfrc[:, :, :, :, irpt] = ewald_dipole_dipole_for_rpoint(
                 xcart_uc, xcart_uc,
@@ -606,13 +606,13 @@ def _compute_dipdip_per_rpoint(
             R_cart = (cell_shift[0] * rprimd_uc[0] + cell_shift[1] * rprimd_uc[1]
                       + cell_shift[2] * rprimd_uc[2])
             xcart_shifted = xcart_uc + R_cart
-            
+
             ewald_atmfrc[:, :, :, :, irpt] = ewald_dipole_dipole_for_rpoint(
                 xcart_uc, xcart_shifted,
                 epsilon_inf, zeff, zeff,
                 rprimd_sc, volume_sc
             )
-    
+
     return ewald_atmfrc
 
 
@@ -625,7 +625,7 @@ def _build_supercell_ifcs_fourier(
 ) -> IFCData:
     """
     Build supercell IFCs using Fourier transform from q-points.
-    
+
     Implements the full ABINIT algorithm:
     1. Expand irreducible q-points to full BZ using symmetry (symdm9)
     2. Generate R-points using bigbx9 (based on ngqpt, NOT ncell)
@@ -636,7 +636,7 @@ def _build_supercell_ifcs_fourier(
     7. Apply ASR to short-range
     8. Total = short + dipdip
     9. Replicate to supercell using ncell
-    
+
     Parameters
     ----------
     unitcell : UnitcellData
@@ -645,17 +645,17 @@ def _build_supercell_ifcs_fourier(
         Supercell crystal structure
     ncell : Tuple[int, int, int]
         Supercell dimensions
-        
+
     Returns
     -------
     IFCData
         Supercell IFCs with proper R-point grid
     """
     from .datastructures import IFCData
-    
+
     natom_uc = unitcell.natom
     natom_sc = crystal_sc.natom
-    
+
     # Get ngqpt for bigbx9 R-point generation
     ngqpt = unitcell.ngqpt
     if ngqpt is None:
@@ -663,11 +663,11 @@ def _build_supercell_ifcs_fourier(
         ngqpt = np.array(ncell, dtype=int)
     nqshft = unitcell.nqshft
     q1shft = unitcell.q1shft
-    
+
     # Step 1: Generate full BZ q-points (smpbz equivalent)
     qbz = _generate_full_bz_qpoints(ngqpt, nqshft, q1shft)
     nqbz = len(qbz)
-    
+
     # Step 2: Expand irreducible dynmat to full BZ (symdm9 equivalent)
     symrel = unitcell.symrel
     if unitcell.dynmat is None:
@@ -685,17 +685,18 @@ def _build_supercell_ifcs_fourier(
             unitcell.qpoints, unitcell.dynmat, qbz, symrel,
             unitcell.rprimd, unitcell.xred, tnons, use_rotation=True
         )
-    
+
     assert dynmat_bz is not None  # guaranteed by checks above
 
     # Step 3: Generate R-points using bigbx9 (based on ngqpt, NOT ncell)
     cell_rpt = _bigbx9_rpoints(ngqpt, nqshft)
     nrpt = cell_rpt.shape[1]
-    
+
     rprimd = unitcell.rprimd
     gprim = 2 * np.pi * np.linalg.inv(rprimd).T
 
-    has_dipdip = (dipdip and unitcell.epsilon_inf is not None
+    has_dipdip = (dipdip
+                  and unitcell.epsilon_inf is not None
                   and unitcell.zeff is not None
                   and np.linalg.norm(unitcell.zeff) > 1e-10)
     if has_dipdip:
@@ -707,14 +708,14 @@ def _build_supercell_ifcs_fourier(
 
     # Step 5: Canonical coordinate transform + phase shift
     rcan, trans = _canonical_coordinates(unitcell.xred, unitcell.rprimd)
-    
+
     dynmat_shifted = _apply_phase_shift(
         dynmat_bz,
         qbz,
         gprim,
         trans
     )
-    
+
     # Step 6: FT (output is short-range since ewald subtracted at Step 4)
     total_atmfrc_uc = _ftifc_q2r(
         dynmat_shifted,
@@ -907,7 +908,7 @@ def build_supercell(
 ) -> SupercellPotential:
     """
     Build supercell potential from unitcell data.
-    
+
     Parameters
     ----------
     unitcell : UnitcellData
@@ -918,12 +919,12 @@ def build_supercell(
         Whether to recompute/add dipole-dipole IFCs when Born charges are available.
     asr : bool
         Whether to enforce the acoustic sum rule when building IFCs.
-        
+
     Returns
     -------
     SupercellPotential
         Supercell ready for evaluation
-        
+
     Examples
     --------
     >>> from pymultibinit.pyeffpot import read_ddb
@@ -933,7 +934,7 @@ def build_supercell(
     """
     # Step 1: Build supercell geometry
     crystal_sc = _build_supercell_geometry(unitcell.crystal, ncell)
-    
+
     if unitcell.qpoints is not None and unitcell.dynmat is not None:
         ifcs_sc = _build_supercell_ifcs_fourier(
             unitcell, crystal_sc, ncell, dipdip=dipdip, asr=asr
@@ -954,21 +955,21 @@ def build_supercell(
         ifcs_sc=ifcs_sc,
         anharmonic_coeffs=None
     )
-    
+
     return supercell
 
 
 def _build_supercell_geometry(crystal_uc: CrystalInfo, ncell: Tuple[int, int, int]) -> CrystalInfo:
     """
     Build supercell crystal structure from unitcell.
-    
+
     Parameters
     ----------
     crystal_uc : CrystalInfo
         Unitcell crystal structure
     ncell : Tuple[int, int, int]
         Supercell dimensions (nx, ny, nz)
-        
+
     Returns
     -------
     CrystalInfo
@@ -977,12 +978,12 @@ def _build_supercell_geometry(crystal_uc: CrystalInfo, ncell: Tuple[int, int, in
     nx, ny, nz = ncell
     natom_uc = crystal_uc.natom
     natom_sc = natom_uc * nx * ny * nz
-    
+
     rprimd_sc = np.diag(ncell) @ crystal_uc.rprimd
-    
+
     xred_sc = np.zeros((natom_sc, 3))
     typat_sc = np.zeros(natom_sc, dtype=int)
-    
+
     idx = 0
     for ix in range(nx):
         for iy in range(ny):
@@ -991,13 +992,13 @@ def _build_supercell_geometry(crystal_uc: CrystalInfo, ncell: Tuple[int, int, in
                     xred_sc[idx, :] = crystal_uc.xred[iat, :] + np.array([ix, iy, iz])
                     typat_sc[idx] = crystal_uc.typat[iat]
                     idx += 1
-    
+
     xred_sc[:, 0] /= nx
     xred_sc[:, 1] /= ny
     xred_sc[:, 2] /= nz
-    
+
     xcart_sc = xred_sc @ rprimd_sc.T
-    
+
     return CrystalInfo(
         natom=natom_sc,
         ntypat=crystal_uc.ntypat,
@@ -1010,14 +1011,14 @@ def _build_supercell_geometry(crystal_uc: CrystalInfo, ncell: Tuple[int, int, in
     )
 
 
-def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo, 
+def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
                     crystal_sc: CrystalInfo, ncell: Tuple[int, int, int]) -> IFCData:
     """
     Replicate short-range IFCs from unitcell to supercell.
     """
     if ifcs_uc is None:
         raise ValueError("Unitcell IFCs not available")
-    
+
     nx, ny, nz = ncell
     natom_uc = crystal_uc.natom
     natom_sc = crystal_sc.natom
@@ -1025,19 +1026,19 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
     legacy_layout = ifcs_uc.short_atmfrc.shape[0] == 3 and ifcs_uc.short_atmfrc.shape[2] == 3
     short_uc = np.transpose(ifcs_uc.short_atmfrc, (1, 0, 3, 2, 4)) if legacy_layout else ifcs_uc.short_atmfrc
     atm_uc = np.transpose(ifcs_uc.atmfrc, (1, 0, 3, 2, 4)) if legacy_layout else ifcs_uc.atmfrc
-    
+
     nrpt_sc = nrpt_uc
     atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_uc))
     short_atmfrc_sc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_uc))
     cell_sc = ifcs_uc.cell.copy()
-    
+
     for irpt in range(nrpt_uc):
         cell_shift = ifcs_uc.cell[:, irpt] if ifcs_uc.cell.ndim == 2 else np.zeros(3, dtype=int)
         for i_uc in range(natom_uc):
             for j_uc in range(natom_uc):
                 short_ifc_uc = short_uc[i_uc, :, j_uc, :, irpt]
                 atm_ifc_uc = atm_uc[i_uc, :, j_uc, :, irpt]
-                
+
                 for ix in range(nx):
                     for iy in range(ny):
                         for iz in range(nz):
@@ -1046,13 +1047,13 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
                             jy = (iy + int(cell_shift[1])) % ny
                             jz = (iz + int(cell_shift[2])) % nz
                             j_sc = _supercell_atom_index(j_uc, jx, jy, jz, ncell, natom_uc)
-                            
+
                             short_atmfrc_sc[i_sc, :, j_sc, :, irpt] = short_ifc_uc
                             atmfrc_sc[i_sc, :, j_sc, :, irpt] = atm_ifc_uc
     if legacy_layout:
         atmfrc_sc = np.transpose(atmfrc_sc, (1, 0, 3, 2, 4))
         short_atmfrc_sc = np.transpose(short_atmfrc_sc, (1, 0, 3, 2, 4))
-    
+
     return IFCData(
         nrpt=nrpt_sc,
         cell=cell_sc,
@@ -1062,7 +1063,7 @@ def _replicate_ifcs(ifcs_uc: IFCData, crystal_uc: CrystalInfo,
     )
 
 
-def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData, 
+def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
                            crystal_sc: CrystalInfo, ncell: Tuple[int, int, int]):
     """
     Compute dipole-dipole (Ewald) contribution to IFCs at Gamma point.
@@ -1070,15 +1071,15 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
     natom_sc = crystal_sc.natom
     natom_uc = unitcell.crystal.natom
     nrpt_sc = ifcs_sc.nrpt
-    
+
     ifcs_sc.ewald_atmfrc = np.zeros((natom_sc, 3, natom_sc, 3, nrpt_sc))
-    
+
     if unitcell.epsilon_inf is None or unitcell.zeff is None:
         return
-    
+
     if np.linalg.norm(unitcell.zeff) < 1e-10:
         return
-    
+
     ncell_prod = ncell[0] * ncell[1] * ncell[2]
     zeff_sc = np.zeros((natom_sc, 3, 3))
     for i_sc in range(natom_sc):

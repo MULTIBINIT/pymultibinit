@@ -34,33 +34,33 @@ from .xml_parser import read_coefficient_xml
 class EffectivePotential:
     """
     Effective potential evaluator for MULTIBINIT.
-    
+
     This class evaluates energy, forces, and stress for atomic configurations
     using the effective potential formalism.
-    
+
     Parameters
     ----------
     supercell : SupercellPotential
         Supercell with all force constants and coefficients.
-    
+
     Examples
     --------
     >>> from pymultibinit.pyeffpot import read_ddb, read_coefficient_xml
     >>> from pymultibinit.pyeffpot import build_supercell, EffectivePotential
-    >>> 
+    >>>
     >>> # Load data
     >>> unitcell = read_ddb("system.DDB")
     >>> coeffs = read_coefficient_xml("coeffs.xml")
-    >>> 
+    >>>
     >>> # Build supercell
     >>> supercell = build_supercell(unitcell, (4, 4, 4))
     >>> supercell.set_anharmonic_coeffs(coeffs)
-    >>> 
+    >>>
     >>> # Evaluate
     >>> potential = EffectivePotential(supercell)
     >>> energy, forces, stress = potential.evaluate(xcart, rprimd)
     """
-    
+
     def __init__(self, supercell: SupercellPotential, standalone_compat: bool = False,
                  standalone_ifc_file: Optional[str] = None):
         """Initialize effective potential."""
@@ -73,7 +73,7 @@ class EffectivePotential:
         self._phi_matrix: Optional[np.ndarray] = None
         self._phonon_strain_matrices: Optional[List[Optional[np.ndarray]]] = None
         self._reference_stress: np.ndarray = np.zeros((3, 3), dtype=float)
-        
+
         # Precompute harmonic force constant matrix (3*natom_sc, 3*natom_sc)
         natom = supercell.natom_sc
         if standalone_compat:
@@ -89,10 +89,16 @@ class EffectivePotential:
         elif supercell.ifcs_sc is not None:
             ifcs = supercell.ifcs_sc
             phi_sum = ifcs.atmfrc.sum(axis=4)
-            self._phi_matrix = phi_sum.reshape(3*natom, 3*natom)
+            if ifcs.ewald_atmfrc is not None:
+                phi_sum = phi_sum + ifcs.ewald_atmfrc.sum(axis=4)
+            phi_matrix = phi_sum.reshape(3*natom, 3*natom)
+            row_sums = phi_matrix.sum(axis=1)
+            for i in range(3*natom):
+                phi_matrix[i, i] -= row_sums[i]
+            self._phi_matrix = phi_matrix
         else:
             self._phi_matrix = None
-            
+
         # Precompute strain coupling matrices
         if hasattr(supercell, 'phonon_strain_sc') and supercell.phonon_strain_sc is not None:
             smats: List[Optional[np.ndarray]] = []
@@ -105,7 +111,7 @@ class EffectivePotential:
                     mat = p_sum.reshape(3*natom, 3*natom)
                     smats.append(mat)
             self._phonon_strain_matrices = smats
-            
+
         self._anharmonic_compiled: Optional[List[Dict[str, Any]]] = None
         self._compile_anharmonic_terms()
         self._jax_compiled = None
@@ -128,7 +134,7 @@ class EffectivePotential:
             return True
         except Exception:
             return False
-    
+
     @classmethod
     def from_files(cls, ddb_file: str, xml_file: Optional[str] = None,
                    ncell: Tuple[int, int, int] = (4, 4, 4),
@@ -183,7 +189,7 @@ class EffectivePotential:
                  rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Evaluate energy, forces, and stress.
-        
+
         Parameters
         ----------
         xcart : np.ndarray, optional
@@ -191,7 +197,7 @@ class EffectivePotential:
             If None, use reference positions.
         rprimd : np.ndarray, optional
             Lattice vectors (Bohr). If None, use reference lattice.
-        
+
         Returns
         -------
         energy : float
@@ -205,45 +211,45 @@ class EffectivePotential:
             xcart = self._reference_positions.copy()
         if rprimd is None:
             rprimd = self._reference_lattice.copy()
-        
+
         # Initialize
         energy = 0.0
         forces = np.zeros((self.supercell.natom_sc, 3))
         stress = np.zeros((3, 3))
-        
+
         # 1. Reference energy
         e_ref = self._compute_reference_energy()
         energy += e_ref
-        
+
         # 2. Displacements
         displacements = self._compute_displacements(xcart, rprimd)
-        
+
         # 3. Strain
         strain = self._compute_strain(rprimd)
-        
+
         # 4. Harmonic energy
         if self._phi_matrix is not None:
             e_harm, f_harm, s_harm = self._evaluate_harmonic(displacements, strain, rprimd)
             energy += e_harm
             forces += f_harm
             stress += s_harm
-        
+
         # 5. Elastic energy (if available)
         if self.supercell.unitcell.elastic_constants is not None:
             e_elast, f_elast, s_elast = self._evaluate_elastic(strain, displacements, rprimd)
             energy += e_elast
             forces += f_elast
             stress += s_elast
-        
+
         # 6. Dipole-dipole is already included in harmonic IFCs
-        
+
         # 7. Strain coupling (phonon-strain)
         if hasattr(self.supercell, 'phonon_strain_sc') and self.supercell.phonon_strain_sc is not None:
             e_sc, f_sc, s_sc = self._evaluate_strain_coupling(strain, displacements, rprimd)
             energy += e_sc
             forces += f_sc
             stress += s_sc
-            
+
         # 8. Anharmonic (if available)
         if self.supercell.anharmonic_coeffs:
             e_anh, f_anh, s_anh = self._evaluate_anharmonic(displacements, strain, rprimd)
@@ -264,24 +270,24 @@ class EffectivePotential:
         forces -= masses[:, np.newaxis] / total_mass * total_force[np.newaxis, :]
 
         return energy, forces, stress
-    
+
     def _evaluate_strain_coupling(self, strain: np.ndarray,
                                   displacements: np.ndarray,
                                   rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Evaluate phonon-strain coupling contribution.
-        
+
         Energy: E = (1/6) Σ_α ε_α Σ_{ia,μ,jb,ν,R} Φ_α(μ,ia,ν,jb,R) u_μ,ia u_ν,jb
         Forces: F_μ,ia = -(1/2) Σ_α ε_α Σ_{jb,ν,R} Φ_α(μ,ia,ν,jb,R) u_ν,jb
         Stress: σ_α = (1/2) Σ_{ia,μ,jb,ν,R} Φ_α(μ,ia,ν,jb,R) u_μ,ia u_ν,jb
-        
+
         Parameters
         ----------
         strain : np.ndarray
             Strain tensor (3, 3).
         displacements : np.ndarray
             Atomic displacements (natom_sc, 3).
-            
+
         Returns
         -------
         energy : float
@@ -292,43 +298,43 @@ class EffectivePotential:
         natom = self.supercell.natom_sc
         forces = np.zeros((natom, 3))
         stress = np.zeros((3, 3))
-        
+
         if rprimd is None:
             rprimd = self._reference_lattice
         strain_voigt = self._strain_to_voigt(strain)
-        
+
         u = displacements.flatten()
         stress_voigt = np.zeros(6)
-        
+
         mats = self._phonon_strain_matrices
         if mats is None:
             return energy, forces, stress
-        
+
         for alpha in range(6):
             mat = mats[alpha]
             if mat is None:
                 continue
-                
+
             # val = u^T @ Φ_α @ u
             val = u @ mat @ u
-            
+
             # F_α = Φ_α @ u
             forces_flat = mat @ u
-            
+
             energy += (1.0 / 6.0) * strain_voigt[alpha] * val
             forces -= (1.0 / 2.0) * strain_voigt[alpha] * forces_flat.reshape(natom, 3)
             stress_voigt[alpha] += (1.0 / 2.0) * val
-            
+
         stress = self._finalize_stress(stress_voigt, forces, displacements, strain, rprimd)
-        
+
         return energy, forces, stress
-    
+
     def _compute_reference_energy(self) -> float:
         """Compute reference energy: E_ref = ncells * E0."""
         ncells = self.supercell.ncells
         e0 = self.supercell.unitcell.energy
         return ncells * e0
-    
+
     def _compute_displacements(self, xcart: np.ndarray, rprimd: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Compute atomic displacements from reference, wrapped to the minimum image.
@@ -365,7 +371,7 @@ class EffectivePotential:
         dr_frac = raw_disp @ lat_inv.T
         dr_frac_wrapped = dr_frac - np.round(dr_frac)
         return dr_frac_wrapped @ rprimd.T
-    
+
     def _compute_strain(self, rprimd: np.ndarray) -> np.ndarray:
         """
         Compute engineering (Biot-like) strain matching the MULTIBINIT/Fortran convention.
@@ -435,22 +441,22 @@ class EffectivePotential:
         corrected[:3] *= (1.0 + strain_voigt[:3]) / ucvol
         corrected[3:] *= (1.0 - strain_voigt[3:] ** 2) / ucvol
         return self._voigt_to_tensor(corrected)
-    
+
     def _evaluate_harmonic(self, displacements: np.ndarray,
                            strain: Optional[np.ndarray] = None,
                            rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Evaluate harmonic IFC contribution.
-        
+
         Energy: E = ½ u^T Φ u
         Forces: F = -Φ u
         Stress: σ = (1/V) u^T ∂Φ/∂ε u
-        
+
         Parameters
         ----------
         displacements : np.ndarray
             Atomic displacements (Bohr).
-        
+
         Returns
         -------
         energy : float
@@ -465,43 +471,43 @@ class EffectivePotential:
             strain = np.zeros((3, 3), dtype=float)
         if rprimd is None:
             rprimd = self._reference_lattice
-        
+
         # Flatten displacements: (natom, 3) -> (3*natom)
         u = displacements.flatten()
-        
+
         phi_matrix = self._phi_matrix
         if phi_matrix is None:
             return 0.0, np.zeros((natom, 3)), np.zeros((3, 3))
-        
+
         # Energy: E = ½ u^T Φ u
         energy = 0.5 * u @ phi_matrix @ u
-        
+
         # Forces: F = -Φ u
         forces_flat = -phi_matrix @ u
-        
+
         forces = forces_flat.reshape(natom, 3)
-        
+
         stress = self._finalize_stress(np.zeros(6, dtype=float), forces, displacements, strain, rprimd)
-        
+
         return energy, forces, stress
-    
+
     def _evaluate_elastic(self, strain: np.ndarray,
                           displacements: np.ndarray,
                           rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Evaluate elastic contribution.
-        
+
         Energy: E = ½ V ε^T C ε
         Forces: F = 0 (no force from homogeneous strain in this approximation)
         Stress: σ = C ε
-        
+
         Parameters
         ----------
         strain : np.ndarray
             Strain tensor.
         displacements : np.ndarray
             Atomic displacements.
-        
+
         Returns
         -------
         energy : float
@@ -537,16 +543,16 @@ class EffectivePotential:
 
         stress = self._finalize_stress(stress_voigt, forces, displacements, strain, rprimd)
         return energy, forces, stress
-    
+
     def _compile_anharmonic_terms(self):
         """Precompute indices and shapes for fast vectorized anharmonic evaluation."""
         if not hasattr(self.supercell, "anharmonic_coeffs") or not self.supercell.anharmonic_coeffs:
             return
-            
+
         n1, n2, n3 = self.supercell.ncell
         natom_uc = self.supercell.unitcell.crystal.natom
         nx, ny, nz = int(n1), int(n2), int(n3)
-        
+
         # Pre-compute the (atom_a, cell_a) mappings to supercell indices
         def get_sc_indices(atom_uc, cell):
             # cell is [ix, iy, iz] relative shifts
@@ -570,24 +576,24 @@ class EffectivePotential:
                 for disp in term.displacements:
                     idx_a = get_sc_indices(disp['atom_a'], disp['cell_a'])
                     idx_b = get_sc_indices(disp['atom_b'], disp['cell_b'])
-                    
+
                     direction_map = {'x': 0, 'y': 1, 'z': 2}
                     dir_idx = direction_map[disp['direction']]
-                    
+
                     compiled_disp.append({
                         'idx_a': idx_a,
                         'idx_b': idx_b,
                         'dir': dir_idx,
                         'power': disp['power']
                     })
-                    
+
                 compiled_terms.append({
                     'value': coeff.value,
                     'weight': term.weight,
                     'displacements': compiled_disp,
                     'strains': term.strains
                 })
-                
+
         self._anharmonic_compiled = compiled_terms
 
     def _evaluate_anharmonic(self, displacements: np.ndarray, strain: np.ndarray, rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
@@ -611,33 +617,33 @@ class EffectivePotential:
         stress_voigt = np.zeros(6, dtype=float)
         energy = 0.0
         ncells = np.prod(self.supercell.ncell)
-        
+
         for term_info in compiled_terms:
             base_coeff = term_info['value'] * term_info['weight']
-            
+
             # Strain multiplier for the whole term
             strain_val = 1.0
             for st in term_info['strains']:
                 strain_val *= strain_voigt[st['voigt']-1] ** st['power']
-            
+
             prod_disp = np.ones(ncells, dtype=float)
             for disp in term_info['displacements']:
                 if disp['power'] == 0:
                     continue
                 diff = displacements[disp['idx_a'], disp['dir']] - displacements[disp['idx_b'], disp['dir']]
                 prod_disp *= diff ** disp['power']
-            
+
             term_energy_array = base_coeff * strain_val * prod_disp
             energy += float(term_energy_array.sum())
-            
+
             # Compute derivative for each displacement factor
             for k, disp_k in enumerate(term_info['displacements']):
                 p_k = disp_k['power']
                 if p_k == 0:
                     continue
-                
+
                 deriv = np.ones(ncells, dtype=float) * (base_coeff * strain_val * p_k)
-                
+
                 for j, disp_j in enumerate(term_info['displacements']):
                     p_j = disp_j['power']
                     if p_j == 0:
@@ -647,23 +653,23 @@ class EffectivePotential:
                         deriv *= diff_j ** (p_j - 1)
                     else:
                         deriv *= diff_j ** p_j
-                        
+
                 np.add.at(forces[:, disp_k['dir']], disp_k['idx_a'], -deriv)
                 np.add.at(forces[:, disp_k['dir']], disp_k['idx_b'], deriv)
-            
+
             # Compute derivative for each strain factor
             for k, st_k in enumerate(term_info['strains']):
                 p_k = st_k['power']
                 if p_k == 0:
                     continue
-                
+
                 # Use precomputed prod_disp and strain_val
                 # dE / ds_alpha_k = base_coeff * p_k * s_alpha_k^(p_k-1) * other_strains * prod_disp
                 # This is equal to (energy_of_term / strain_voigt_k) * p_k
-                
+
                 v_idx = st_k['voigt'] - 1
                 s_val = strain_voigt[v_idx]
-                
+
                 if abs(s_val) > 1e-12:
                     deriv_s = term_energy_array * p_k / s_val
                 else:
@@ -676,24 +682,24 @@ class EffectivePotential:
                                 deriv_s *= strain_voigt[st_j['voigt']-1] ** st_j['power']
                     else:
                         deriv_s = np.zeros_like(term_energy_array)
-                
+
                 stress_voigt[v_idx] += float(deriv_s.sum())
-                
+
         stress = self._finalize_stress(stress_voigt, forces, displacements, strain, rprimd)
-                 
+
         return energy, forces, stress
-    
+
     def evaluate_energy_only(self, xcart: Optional[np.ndarray] = None,
                              rprimd: Optional[np.ndarray] = None) -> float:
         """Evaluate only the energy (faster than full evaluation)."""
         energy, _, _ = self.evaluate(xcart, rprimd)
         return energy
-    
+
     def evaluate_forces_only(self, xcart: Optional[np.ndarray] = None) -> np.ndarray:
         """Evaluate only the forces."""
         _, forces, _ = self.evaluate(xcart)
         return forces
-    
+
     def evaluate_stress_only(self, xcart: Optional[np.ndarray] = None,
                              rprimd: Optional[np.ndarray] = None) -> np.ndarray:
         """Evaluate only the stress tensor."""
