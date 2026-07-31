@@ -5,6 +5,40 @@ All notable changes to pymultibinit will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [Unreleased]
+
+### Added
+- **Energy/force/stress decomposition API**: Decompose the total energy, forces,
+  and stress into per-term contributions (reference, local harmonic IFCs,
+  dipole-dipole, anharmonic, elastic, strain-coupling).
+  - New ASE-compatible method `MultibinitCalculator.get_contributions(atoms)`
+    returning a `Contributions` dataclass with per-term `energy`/`forces`/
+    `stress` dicts and `total_energy()`/`total_forces()`/`total_stress()`
+    accessors that reproduce the ASE getters exactly.
+  - New `MultibinitPotential.evaluate_contributions(positions, lattice)`
+    returning the same decomposition as a `{term: (e, f, s)}` dict in
+    eV / eV-Å / eV-Å³ units.
+  - New `EffectivePotential.evaluate_contributions(xcart, rprimd)` at the
+    pure-Python backend layer (atomic units).
+  - The harmonic IFC term is split into local (`harmonic_local`) and
+    dipole-dipole (`dipdip`) parts via independently ASR-corrected force
+    constant matrices; the two parts sum exactly to the combined harmonic.
+  - Exported `Contributions` from the top-level `pymultibinit` package.
+  - Only the pure-Python (`pyeffpot`) backend supports decomposition; the
+    CFFI (Fortran) and spawned-process backends raise `NotImplementedError`.
+
+### Changed
+- **Dependency declaration**: `matplotlib` and `netCDF4` are now declared as
+  required dependencies (they were imported but not listed). `jax` is now an
+  optional extra (`pip install pymultibinit[jax]`) that accelerates the
+  anharmonic backend; it falls back to an equivalent NumPy path when absent.
+
+### Documentation
+- New `docs/ENERGY_FORCE_STRESS_DECOMPOSITION.md` guide.
+- New runnable example `examples/contributions_decomposition/`.
+- README updated: backend/dependency notes, decomposition section, examples.
+
 ## [0.2.0] - 2025-12-07
 
 ### Added

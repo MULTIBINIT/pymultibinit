@@ -1,7 +1,7 @@
 [project]
 name = "pymultibinit"
-version = "0.3.6"
-description = "Add your description here"
+version = "0.3.7"
+description = "Python interface to ABINIT's MULTIBINIT effective-potential library"
 readme = "README.md"
 authors = [
     { name = "Xu He", email = "x.he@uliege.be" }
@@ -10,9 +10,19 @@ requires-python = ">=3.10"
 dependencies = [
     "ase>=3.26.0",
     "cffi>=2.0.0",
+    "matplotlib>=3.5.0",
+    "netCDF4>=1.6.0",
     "numpy>=2.2.6",
     "phonopy>=3.0.0",
     "scipy>=1.15.3",
+]
+
+# Optional features. Install with ``pip install pymultibinit[jax]``.
+# JAX accelerates anharmonic evaluation and falls back to NumPy if absent, so
+# it is the only optional dependency; everything else above is required.
+[project.optional-dependencies]
+jax = [
+    "jax>=0.4.0",
 ]
 
 [project.scripts]

@@ -25,7 +25,19 @@ export LD_LIBRARY_PATH=/path/to/abinit/build/src/98_main:$LD_LIBRARY_PATH
 # 3. Install Python package
 pip install pymultibinit
 # or: pip install -e .
+
+# Optional: JAX acceleration for the anharmonic backend (falls back to NumPy)
+pip install pymultibinit[jax]
 ```
+
+> **Two backends.** The **pyeffpot** backend is pure Python and needs only the
+> DDB file (plus `numpy`, `scipy`, `ase`, `matplotlib`, `netCDF4`, `phonopy`).
+> The **CFFI backend** wraps the ABINIT `libabinit` Fortran library built in
+> steps 1–2 above; it is required only for `from_params` / `from_abi` /
+> `from_config_file`. `from_pyeffpot` works without any Fortran library.
+>
+> **Optional dependency:** `jax` (install via `[jax]`) accelerates anharmonic
+> evaluation and is otherwise replaced by an equivalent NumPy path.
 
 ## Quick Start
 
@@ -57,8 +69,8 @@ calc = MultibinitCalculator.from_pyeffpot(
 )
 
 # Build supercell (must match ncell!)
-unit_cell = Atoms('BaHfO3', 
-                 scaled_positions=[[0,0,0], [0.5,0.5,0.5], 
+unit_cell = Atoms('BaHfO3',
+                 scaled_positions=[[0,0,0], [0.5,0.5,0.5],
                                    [0.5,0,0.5], [0,0.5,0.5], [0.5,0.5,0]],
                  cell=[4.0, 4.0, 4.0], pbc=True)
 atoms = unit_cell * (2, 2, 2)  # Match ncell=(2,2,2)
@@ -167,6 +179,31 @@ The export writes only `phonopy_params.yaml`. The default supercell is the DDB
 `ngqpt` q-grid. If `--supercell NX NY NZ` is provided, it must match that
 q-grid.
 
+## Energy / Force / Stress Decomposition
+
+The total energy, forces, and stress can be split into per-term contributions:
+the dipole-dipole (`dipdip`), local harmonic IFC (`harmonic_local`), and
+anharmonic (`anharmonic`) parts, plus reference / elastic / strain-coupling
+terms when present. The decomposition is exposed through an ASE-compatible API
+and reproduces the standard getters exactly when summed over all terms.
+
+```python
+atoms.calc = calc
+contrib = calc.get_contributions(atoms)   # -> Contributions dataclass
+
+contrib.energy["dipdip"]            # eV
+contrib.forces["harmonic_local"]    # (natom, 3), eV/Angstrom
+contrib.stress["anharmonic"]        # (6,) Voigt, eV/Angstrom^3
+
+contrib.total_forces()   # == atoms.get_forces(), exactly
+```
+
+Only the **pyeffpot** backend supports decomposition; the CFFI/Fortran backend
+raises `NotImplementedError`. For the full guide see
+[`docs/ENERGY_FORCE_STRESS_DECOMPOSITION.md`](docs/ENERGY_FORCE_STRESS_DECOMPOSITION.md),
+and for a runnable example see
+[`examples/contributions_decomposition/`](examples/contributions_decomposition).
+
 ## API Reference
 
 ### `MultibinitCalculator` (ASE interface)
@@ -202,6 +239,14 @@ calc = MultibinitCalculator.from_pyeffpot(
     dipdip=True,            # long-range dipole-dipole correction
     asr=True,               # acoustic sum rule
 )
+```
+
+#### Decomposing energy, forces, and stress (pyeffpot backend only)
+
+```python
+# Per-term contributions: dipdip, harmonic_local, anharmonic, ...
+contrib = calc.get_contributions(atoms)   # -> Contributions
+contrib.total_forces()   # == atoms.get_forces(), exactly
 ```
 
 ### `MultibinitPotential` (Low-level interface)
@@ -303,6 +348,15 @@ Runnable dry run:
 
 ```bash
 uv run python examples/BaHfO3_training/01_train_bahfo3.py --dry-run
+```
+
+Energy/force/stress decomposition (self-contained, no libabinit):
+
+- `docs/ENERGY_FORCE_STRESS_DECOMPOSITION.md`
+- `examples/contributions_decomposition/get_contributions.py`
+
+```bash
+python examples/contributions_decomposition/get_contributions.py
 ```
 
 ## License
