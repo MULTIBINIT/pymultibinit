@@ -5,12 +5,75 @@ Allows seamless integration with the Atomic Simulation Environment (ASE)
 for structure optimization, molecular dynamics, phonon calculations, etc.
 """
 import multiprocessing
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Tuple
 
 from ase.calculators.calculator import Calculator, all_changes
 import numpy as np
 
 from .potential import MultibinitPotential
+
+
+@dataclass
+class Contributions:
+    """Energy / force / stress decomposition of the effective potential.
+
+    Each term's arrays are in ASE units: energy in eV, forces in eV/Angstrom,
+    stress in eV/Angstrom^3 in Voigt order ``[xx, yy, zz, yz, xz, xy]``.
+    Summed over :attr:`terms` the arrays reproduce ``get_potential_energy()``,
+    ``get_forces()`` and ``get_stress()`` exactly.
+
+    Attributes
+    ----------
+    energy : dict[str, float]
+        Per-term energy (eV).
+    forces : dict[str, np.ndarray]
+        Per-term forces, shape (natom, 3), in the input atom order (eV/Angstrom).
+    stress : dict[str, np.ndarray]
+        Per-term stress, shape (6,) Voigt (eV/Angstrom^3).
+    terms : tuple[str, ...]
+        Ordered contribution names.
+
+    Examples
+    --------
+    >>> contrib = calc.get_contributions(atoms)
+    >>> contrib.energy["dipdip"]          # dipole-dipole energy
+    >>> contrib.forces["harmonic_local"]  # local harmonic IFC forces
+    >>> contrib.total_energy() == atoms.get_potential_energy()
+    """
+    energy: Dict[str, float] = field(default_factory=dict)
+    forces: Dict[str, np.ndarray] = field(default_factory=dict)
+    stress: Dict[str, np.ndarray] = field(default_factory=dict)
+    terms: Tuple[str, ...] = ()
+
+    @classmethod
+    def from_terms(cls, terms: Dict[str, Tuple[float, np.ndarray, np.ndarray]]) -> "Contributions":
+        """Build from a ``{name: (energy, forces, stress)}`` mapping."""
+        energy: Dict[str, float] = {}
+        forces: Dict[str, np.ndarray] = {}
+        stress: Dict[str, np.ndarray] = {}
+        for name, (e, f, s) in terms.items():
+            energy[name] = float(e)
+            forces[name] = np.asarray(f, dtype=float)
+            stress[name] = np.asarray(s, dtype=float)
+        return cls(energy=energy, forces=forces, stress=stress,
+                   terms=tuple(terms.keys()))
+
+    def total_energy(self) -> float:
+        """Sum of all per-term energies (eV)."""
+        return float(sum(self.energy.values()))
+
+    def total_forces(self) -> np.ndarray:
+        """Sum of all per-term forces, shape (natom, 3) (eV/Angstrom)."""
+        if not self.forces:
+            raise ValueError("no force contributions available")
+        return sum(self.forces.values())
+
+    def total_stress(self) -> np.ndarray:
+        """Sum of all per-term stresses, shape (6,) Voigt (eV/Angstrom^3)."""
+        if not self.stress:
+            raise ValueError("no stress contributions available")
+        return sum(self.stress.values())
 
 
 def _abi_spawned_worker(
@@ -165,12 +228,12 @@ class _SpawnedPotential:
 class MultibinitCalculator(Calculator):
     """
     ASE calculator for ABINIT's MULTIBINIT effective potential.
-    
+
     This calculator wraps the MULTIBINIT C API and provides a standard ASE
     interface for energy, force, and stress calculations.
-    
+
     Properties implemented: energy, forces, stress
-    
+
     Two backends are available:
         - 'cffi'   : Requires libabinit.so/dylib (Fortran). Use from_abi(),
                      from_params(), or from_config_file().
@@ -205,13 +268,13 @@ class MultibinitCalculator(Calculator):
         ... )
         >>> atoms.calc = calc
     """
-    
+
     implemented_properties = ['energy', 'forces', 'stress']
-    
+
     def __init__(self, potential: MultibinitPotential | _SpawnedPotential, **kwargs):
         """
         Initialize the calculator with an existing potential.
-        
+
         Args:
             potential: Initialized MultibinitPotential instance
             **kwargs: Additional arguments for ASE Calculator
@@ -219,14 +282,14 @@ class MultibinitCalculator(Calculator):
         super().__init__(**kwargs)
         self.potential = potential
         self._closed = False
-    
+
     @classmethod
     def from_abi(cls, abi_file: str, lib_path: Optional[str] = None,
                  *, auto_match_atoms: bool = True, match_tolerance: float = 0.1,
                  **kwargs) -> 'MultibinitCalculator':
         """
         Create calculator from a .abi input file.
-        
+
         Args:
             abi_file: Path to the .abi input file
             lib_path: Path to libabinit.so/dylib (optional)
@@ -234,7 +297,7 @@ class MultibinitCalculator(Calculator):
                 MULTIBINIT reference on the first evaluation.
             match_tolerance: Atom-matching tolerance in Angstrom.
             **kwargs: Additional arguments for ASE Calculator
-            
+
         Returns:
             Initialized MultibinitCalculator instance
         """
@@ -264,7 +327,7 @@ class MultibinitCalculator(Calculator):
             match_tolerance=match_tolerance,
         )
         return cls(potential=potential, **kwargs)
-    
+
     @classmethod
     def from_params(cls, ddb_file: str, sys_file: str = "", coeff_file: str = "",
                    ncell: Tuple[int, int, int] = (1, 1, 1),
@@ -274,7 +337,7 @@ class MultibinitCalculator(Calculator):
                    **kwargs) -> 'MultibinitCalculator':
         """
         Create calculator from direct parameters (no .abi file).
-        
+
         Args:
             ddb_file: Path to DDB file
             sys_file: Path to system XML file (optional)
@@ -284,7 +347,7 @@ class MultibinitCalculator(Calculator):
             dipdip: Dipole-dipole interactions (0=off, 1=on)
             lib_path: Path to libabinit.so/dylib (optional)
             **kwargs: Additional arguments for ASE Calculator
-            
+
         Returns:
             Initialized MultibinitCalculator instance
         """
@@ -298,7 +361,7 @@ class MultibinitCalculator(Calculator):
             lib_path=lib_path
         )
         return cls(potential=potential, **kwargs)
-    
+
     @classmethod
     def from_pyeffpot(cls, ddb_file: str, xml_file: Optional[str] = None,
                       ncell: Tuple[int, int, int] = (4, 4, 4),
@@ -365,41 +428,41 @@ class MultibinitCalculator(Calculator):
             reference_stress_ha_bohr3=reference_stress_ha_bohr3,
         )
         return cls(potential=potential, **kwargs)
-    
+
     @classmethod
     def from_config_file(cls, config_file: str, **kwargs) -> 'MultibinitCalculator':
         """
         Create calculator from a configuration file.
-        
+
         The configuration file can specify either:
         1. abi_file: Path to .abi input file
         2. ddb_file + sys_file: Direct initialization
-        
+
         Simple format example:
             ```
             ddb_file: system_DDB
             sys_file: system.xml
             ncell: 2 2 2
             ```
-        
+
         INI-like format example:
             ```
             [files]
             ddb_file = system_DDB
             sys_file = system.xml
-            
+
             [parameters]
             ncell = 2 2 2
             ngqpt = 4 4 4
             ```
-        
+
         Args:
             config_file: Path to the configuration file
             **kwargs: Additional arguments for ASE Calculator
-            
+
         Returns:
             Initialized MultibinitCalculator instance
-            
+
         Raises:
             FileNotFoundError: If config file doesn't exist
             ValueError: If required parameters are missing or invalid
@@ -409,6 +472,70 @@ class MultibinitCalculator(Calculator):
 
     def get_reference_atoms(self):
         return self.potential.export_supercell_to_ase()
+
+    def get_contributions(self, atoms=None) -> "Contributions":
+        """
+        Return the energy/force/stress decomposition by physical term.
+
+        This is the ASE-compatible entry point for inspecting how the total
+        energy, forces, and stress split into contributions. The returned
+        :class:`Contributions` object exposes per-term dicts plus
+        ``total_energy()`` / ``total_forces()`` / ``total_stress()`` that
+        reproduce the standard ASE getters exactly.
+
+        Terms: ``reference``, ``harmonic_local`` (local harmonic IFCs),
+        ``dipdip`` (dipole-dipole / long-range Coulomb), ``anharmonic``,
+        and, when the model contains them, ``elastic`` and
+        ``strain_coupling``.
+
+        Parameters
+        ----------
+        atoms : ase.Atoms, optional
+            Structure to evaluate. If omitted, the calculator's currently
+            attached atoms are used.
+
+        Returns
+        -------
+        Contributions
+
+        Raises
+        ------
+        NotImplementedError
+            If the backend does not support decomposition (CFFI / Fortran or
+            spawned-process backends). Only the pure-Python ``pyeffpot``
+            backend exposes per-term contributions.
+
+        Example
+        -------
+        >>> calc = MultibinitCalculator.from_pyeffpot("BTO.DDB", "model.xml")
+        >>> atoms.calc = calc
+        >>> contrib = calc.get_contributions()
+        >>> contrib.energy["dipdip"]            # dipole-dipole energy (eV)
+        >>> contrib.forces["anharmonic"]        # anharmonic forces
+        >>> contrib.total_forces() - atoms.get_forces()  # ~0
+        """
+        if self._closed:
+            raise RuntimeError("MultibinitCalculator is closed")
+
+        evaluate_contrib = getattr(self.potential, "evaluate_contributions", None)
+        if evaluate_contrib is None:
+            raise NotImplementedError(
+                "Energy decomposition is only supported by the pure-Python "
+                "(pyeffpot) backend. The CFFI (Fortran) and spawned-process "
+                "backends do not expose per-term contributions."
+            )
+
+        if atoms is not None:
+            self.atoms = atoms
+        if self.atoms is None:
+            raise RuntimeError("MultibinitCalculator requires ASE atoms")
+
+        positions = self.atoms.get_positions()
+        cell = self.atoms.get_cell().array
+        raw = evaluate_contrib(positions, cell)
+        contributions = Contributions.from_terms(raw)
+        self.results['contributions'] = contributions
+        return contributions
 
     def close(self):
         if not self._closed:
@@ -426,7 +553,7 @@ class MultibinitCalculator(Calculator):
     def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
         """
         Calculate properties for the given atoms object.
-        
+
         Args:
             atoms: ASE Atoms object (if None, uses self.atoms)
             properties: List of properties to calculate
@@ -439,17 +566,17 @@ class MultibinitCalculator(Calculator):
 
         if self.atoms is None:
             raise RuntimeError("MultibinitCalculator requires ASE atoms")
-        
+
         # Get positions and cell from atoms (in Angstrom)
         positions = self.atoms.get_positions()  # (natom, 3) in Angstrom
         cell = self.atoms.get_cell().array      # (3, 3) in Angstrom
-        
+
         # Evaluate using potential (handles unit conversion internally)
         energy, forces, stress = self.potential.evaluate(positions, cell)
-        
+
         # Store results in ASE format
         self.results['energy'] = energy  # eV
         self.results['forces'] = forces  # eV/Angstrom
-        
+
         # ASE stress order is [xx, yy, zz, yz, xz, xy] in eV/Angstrom^3.
         self.results['stress'] = stress  # eV/Angstrom^3

@@ -71,6 +71,8 @@ class EffectivePotential:
         self._standalone_frame_shifts: Optional[np.ndarray] = None
 
         self._phi_matrix: Optional[np.ndarray] = None
+        self._phi_local: Optional[np.ndarray] = None
+        self._phi_dipdip: Optional[np.ndarray] = None
         self._phonon_strain_matrices: Optional[List[Optional[np.ndarray]]] = None
         self._reference_stress: np.ndarray = np.zeros((3, 3), dtype=float)
 
@@ -88,14 +90,27 @@ class EffectivePotential:
                 )
         elif supercell.ifcs_sc is not None:
             ifcs = supercell.ifcs_sc
-            phi_sum = ifcs.atmfrc.sum(axis=4)
-            if ifcs.ewald_atmfrc is not None:
-                phi_sum = phi_sum + ifcs.ewald_atmfrc.sum(axis=4)
-            phi_matrix = phi_sum.reshape(3*natom, 3*natom)
-            row_sums = phi_matrix.sum(axis=1)
-            for i in range(3*natom):
-                phi_matrix[i, i] -= row_sums[i]
-            self._phi_matrix = phi_matrix
+            # Local (short-range) harmonic IFC matrix.
+            phi_local = ifcs.atmfrc.sum(axis=4).reshape(3 * natom, 3 * natom)
+            # Dipole-dipole (Ewald long-range) harmonic IFC matrix.
+            # When dipdip is disabled the builder still returns a zero-filled
+            # ewald_atmfrc; treat that as "no dipole-dipole term" so the
+            # decomposition does not report a vacuous zero contribution.
+            phi_dipdip = None
+            if ifcs.ewald_atmfrc is not None and np.any(ifcs.ewald_atmfrc):
+                phi_dipdip = ifcs.ewald_atmfrc.sum(axis=4).reshape(3 * natom, 3 * natom)
+                row_sums = phi_dipdip.sum(axis=1)
+                for i in range(3 * natom):
+                    phi_dipdip[i, i] -= row_sums[i]
+            # Apply the acoustic-sum-rule diagonal correction to the local
+            # part. When a dipdip part exists its correction was applied above;
+            # the two corrections are linear and sum to the combined ASR matrix.
+            row_sums = phi_local.sum(axis=1)
+            for i in range(3 * natom):
+                phi_local[i, i] -= row_sums[i]
+            self._phi_local = phi_local
+            self._phi_dipdip = phi_dipdip
+            self._phi_matrix = phi_local + (phi_dipdip if phi_dipdip is not None else 0.0)
         else:
             self._phi_matrix = None
 
@@ -271,6 +286,100 @@ class EffectivePotential:
 
         return energy, forces, stress
 
+    def evaluate_contributions(self, xcart: Optional[np.ndarray] = None,
+                               rprimd: Optional[np.ndarray] = None) -> Dict[str, Tuple[float, np.ndarray, np.ndarray]]:
+        """
+        Evaluate energy, forces, and stress decomposed by physical term.
+
+        The returned dict maps each active contribution name to a
+        ``(energy, forces, stress)`` tuple in atomic units (Hartree,
+        Hartree/Bohr, Hartree/Bohr^3; stress is a full (3, 3) tensor).
+
+        Contributions
+        --------------
+        reference        : E_ref = ncells * E0 plus the equilibrium stress.
+        harmonic_local   : local (short-range) harmonic IFCs.  [the "(b)" term]
+        dipdip           : dipole-dipole (Ewald long-range) harmonic IFCs.  [the "(a)" term]
+        anharmonic       : anharmonic XML coefficients.  [the "(c)" term]
+        elastic          : homogeneous elastic constants (when present).
+        strain_coupling  : phonon-strain coupling (when present).
+
+        Only the contributions that are active for this potential appear as
+        keys. The arrays summed over all keys reproduce ``evaluate()`` exactly
+        (the mass-weighted residual-force projection is applied to each term,
+        which is a linear operation, so the per-term results sum to the total).
+
+        Parameters
+        ----------
+        xcart : np.ndarray, optional
+            Atomic positions in Cartesian coordinates (Bohr).
+            Defaults to the reference positions.
+        rprimd : np.ndarray, optional
+            Lattice vectors (Bohr). Defaults to the reference lattice.
+
+        Returns
+        -------
+        dict
+            ``{term_name: (energy, forces, stress)}``.
+        """
+        if xcart is None:
+            xcart = self._reference_positions.copy()
+        if rprimd is None:
+            rprimd = self._reference_lattice.copy()
+
+        natom = self.supercell.natom_sc
+        displacements = self._compute_displacements(xcart, rprimd)
+        strain = self._compute_strain(rprimd)
+
+        contributions: Dict[str, Tuple[float, np.ndarray, np.ndarray]] = {}
+
+        # Reference energy + equilibrium stress.
+        e_ref = self._compute_reference_energy()
+        contributions['reference'] = (
+            e_ref, np.zeros((natom, 3)), self._reference_stress.copy()
+        )
+
+        # Harmonic: local (short-range) and dipole-dipole (Ewald), split.
+        if self._phi_local is not None:
+            contributions['harmonic_local'] = self._evaluate_harmonic_with_phi(
+                self._phi_local, displacements, strain, rprimd)
+        if self._phi_dipdip is not None:
+            contributions['dipdip'] = self._evaluate_harmonic_with_phi(
+                self._phi_dipdip, displacements, strain, rprimd)
+        # Fallback when only a combined matrix is known (e.g. standalone mode).
+        if 'harmonic_local' not in contributions and 'dipdip' not in contributions \
+                and self._phi_matrix is not None:
+            contributions['harmonic'] = self._evaluate_harmonic_with_phi(
+                self._phi_matrix, displacements, strain, rprimd)
+
+        # Elastic constants.
+        if self.supercell.unitcell.elastic_constants is not None:
+            contributions['elastic'] = self._evaluate_elastic(
+                strain, displacements, rprimd)
+
+        # Phonon-strain coupling.
+        if getattr(self.supercell, 'phonon_strain_sc', None) is not None:
+            contributions['strain_coupling'] = self._evaluate_strain_coupling(
+                strain, displacements, rprimd)
+
+        # Anharmonic coefficients.
+        if self.supercell.anharmonic_coeffs:
+            contributions['anharmonic'] = self._evaluate_anharmonic(
+                displacements, strain, rprimd)
+
+        # Apply the mass-weighted residual-force projection to every term.
+        # Linear in the forces, so the terms still sum to evaluate().
+        typat = self.supercell.crystal_sc.typat.astype(int)
+        amu = self.supercell.unitcell.crystal.amu
+        masses = amu[typat - 1]
+        total_mass = masses.sum()
+        corrected: Dict[str, Tuple[float, np.ndarray, np.ndarray]] = {}
+        for name, (e, f, s) in contributions.items():
+            term_total_force = f.sum(axis=0)
+            f_corr = f - masses[:, np.newaxis] / total_mass * term_total_force[np.newaxis, :]
+            corrected[name] = (e, f_corr, s)
+        return corrected
+
     def _evaluate_strain_coupling(self, strain: np.ndarray,
                                   displacements: np.ndarray,
                                   rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
@@ -442,54 +551,43 @@ class EffectivePotential:
         corrected[3:] *= (1.0 - strain_voigt[3:] ** 2) / ucvol
         return self._voigt_to_tensor(corrected)
 
-    def _evaluate_harmonic(self, displacements: np.ndarray,
-                           strain: Optional[np.ndarray] = None,
-                           rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
+    def _evaluate_harmonic_with_phi(self, phi_matrix: Optional[np.ndarray],
+                                    displacements: np.ndarray,
+                                    strain: Optional[np.ndarray] = None,
+                                    rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
         """
-        Evaluate harmonic IFC contribution.
+        Evaluate the harmonic IFC contribution for an explicit force-constant
+        matrix (3*natom, 3*natom).
 
-        Energy: E = ½ u^T Φ u
-        Forces: F = -Φ u
-        Stress: σ = (1/V) u^T ∂Φ/∂ε u
+        Used to split the harmonic term into its local (short-range) and
+        dipole-dipole (Ewald) parts by passing the corresponding phi matrix.
 
-        Parameters
-        ----------
-        displacements : np.ndarray
-            Atomic displacements (Bohr).
-
-        Returns
-        -------
-        energy : float
-            Harmonic energy (Hartree).
-        forces : np.ndarray
-            Harmonic forces (Hartree/Bohr).
-        stress : np.ndarray
-            Harmonic stress (Hartree/Bohr^3).
+        Energy: E = ½ u^T Φ u, Forces: F = -Φ u.
         """
         natom = self.supercell.natom_sc
         if strain is None:
             strain = np.zeros((3, 3), dtype=float)
         if rprimd is None:
             rprimd = self._reference_lattice
-
-        # Flatten displacements: (natom, 3) -> (3*natom)
-        u = displacements.flatten()
-
-        phi_matrix = self._phi_matrix
         if phi_matrix is None:
             return 0.0, np.zeros((natom, 3)), np.zeros((3, 3))
 
-        # Energy: E = ½ u^T Φ u
+        u = displacements.flatten()
         energy = 0.5 * u @ phi_matrix @ u
-
-        # Forces: F = -Φ u
-        forces_flat = -phi_matrix @ u
-
-        forces = forces_flat.reshape(natom, 3)
-
+        forces = (-phi_matrix @ u).reshape(natom, 3)
         stress = self._finalize_stress(np.zeros(6, dtype=float), forces, displacements, strain, rprimd)
-
         return energy, forces, stress
+
+    def _evaluate_harmonic(self, displacements: np.ndarray,
+                           strain: Optional[np.ndarray] = None,
+                           rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
+        """
+        Evaluate the combined harmonic IFC contribution (local + dipole-dipole).
+
+        Energy: E = ½ u^T Φ u, Forces: F = -Φ u,
+        Stress: σ = (1/V) u^T ∂Φ/∂ε u.
+        """
+        return self._evaluate_harmonic_with_phi(self._phi_matrix, displacements, strain, rprimd)
 
     def _evaluate_elastic(self, strain: np.ndarray,
                           displacements: np.ndarray,

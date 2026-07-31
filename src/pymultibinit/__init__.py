@@ -13,13 +13,13 @@ Main classes:
 Example:
     >>> from pymultibinit import MultibinitCalculator
     >>> from ase import Atoms
-    >>> 
+    >>>
     >>> # Create calculator from .abi file
     >>> calc = MultibinitCalculator.from_abi("input.abi")
     >>> atoms.calc = calc
     >>> energy = atoms.get_potential_energy()
     >>> forces = atoms.get_forces()
-    
+
     >>> # Or from parameters
     >>> calc = MultibinitCalculator.from_params(
     ...     ddb_file="system_DDB",
@@ -29,7 +29,7 @@ Example:
 """
 
 from .potential import MultibinitPotential
-from .calculator import MultibinitCalculator
+from .calculator import MultibinitCalculator, Contributions
 from .wrapper_cffi import MultibinitWrapperCFFI
 from .pyeffpot import PhonopyDdbExportResult, write_phonopy_from_ddb
 
@@ -96,7 +96,7 @@ __all__ = [
     "evaluate_basis_features_jax",
     "evaluate_basis_features_vectorized",
     "MultibinitPotential",
-    "MultibinitCalculator", 
+    "MultibinitCalculator",
     "MultibinitWrapperCFFI",
     "MultibinitConfig",
     "PhonopyDdbExportResult",
@@ -137,4 +137,5 @@ __all__ = [
     "with_fortran_text_labels",
     "write_phonopy_from_ddb",
     "write_fitted_xml",
+    "Contributions",
 ]
