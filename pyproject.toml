@@ -1,6 +1,6 @@
 [project]
 name = "pymultibinit"
-version = "0.3.10"
+version = "0.3.11"
 description = "Python interface to ABINIT's MULTIBINIT effective-potential library"
 readme = "README.md"
 authors = [
