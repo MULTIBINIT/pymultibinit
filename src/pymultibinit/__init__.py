@@ -86,7 +86,7 @@ from .training import (
     write_fitted_xml,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.10"
 
 __all__ = [
     "CompiledTerm",
