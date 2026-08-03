@@ -509,16 +509,17 @@ class EffectivePotential:
     def _compute_du_delta(self, displacements: np.ndarray, strain: np.ndarray) -> np.ndarray:
         """Compute MULTIBINIT displacement derivatives with respect to Voigt strain."""
         strain_inv = np.linalg.inv(np.eye(3) + strain)
+        # strain_inv @ disp is the same transform for every atom -> one matmul
+        # over all atoms, then a fixed voigt gather (no per-atom loop needed).
+        strain_inv_u = displacements @ strain_inv.T                # (natom, 3)
         pairs = ((0, 0), (1, 1), (2, 2), (2, 1), (2, 0), (1, 0))
         du_delta = np.zeros((6, displacements.shape[0], 3), dtype=float)
-        for iatom, disp in enumerate(displacements):
-            strain_inv_u = strain_inv @ disp
-            for ivoigt, (alpha, beta) in enumerate(pairs):
-                for mu in range(3):
-                    if alpha == mu:
-                        du_delta[ivoigt, iatom, mu] += 0.5 * strain_inv_u[beta]
-                    if beta == mu:
-                        du_delta[ivoigt, iatom, mu] += 0.5 * strain_inv_u[alpha]
+        for ivoigt, (alpha, beta) in enumerate(pairs):
+            for mu in range(3):
+                if alpha == mu:
+                    du_delta[ivoigt, :, mu] += 0.5 * strain_inv_u[:, beta]
+                if beta == mu:
+                    du_delta[ivoigt, :, mu] += 0.5 * strain_inv_u[:, alpha]
         return du_delta
 
     @staticmethod
@@ -630,14 +631,22 @@ class EffectivePotential:
         if coupling is not None:
             coupling = np.asarray(coupling, dtype=float)
             if coupling.shape == (6, 3, self.supercell.unitcell.natom):
-                for iatom in range(natom):
-                    iuc = iatom % self.supercell.unitcell.natom
-                    for alpha in range(6):
-                        for mu in range(3):
-                            value = coupling[alpha, mu, iuc]
-                            energy += 0.5 * value * strain_voigt[alpha] * displacements[iatom, mu]
-                            forces[iatom, mu] -= 0.5 * value * strain_voigt[alpha]
-                            stress_voigt[alpha] += 0.5 * value * displacements[iatom, mu]
+                # Vectorized replacement for the per-atom triple loop:
+                #   for n in range(natom):
+                #       iuc = n % natom_uc
+                #       for alpha in range(6):
+                #           for mu in range(3):
+                #               value = coupling[alpha, mu, iuc]
+                #               energy   += 0.5 * value * sv[alpha] * disp[n, mu]
+                #               forces[n, mu] -= 0.5 * value * sv[alpha]
+                #               stress[alpha]  += 0.5 * value * disp[n, mu]
+                # c_sc[n, alpha, mu] = coupling[alpha, mu, n % natom_uc] broadcasts the
+                # unit-cell coupling to every supercell atom.
+                iuc_all = np.arange(natom) % self.supercell.unitcell.natom
+                c_sc = coupling[:, :, iuc_all].transpose(2, 0, 1)
+                energy += 0.5 * np.einsum("nam,nm,a->", c_sc, displacements, strain_voigt)
+                forces -= 0.5 * np.einsum("nam,a->nm", c_sc, strain_voigt)
+                stress_voigt += 0.5 * np.einsum("nam,nm->a", c_sc, displacements)
 
         stress = self._finalize_stress(stress_voigt, forces, displacements, strain, rprimd)
         return energy, forces, stress
