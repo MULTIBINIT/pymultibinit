@@ -40,9 +40,7 @@ from pymultibinit.atom_matching import (
     apply_mapping_to_positions,
     apply_inverse_mapping_to_forces,
 )
-
-HA = 27.211386245988
-BOHR = 0.529177210903
+from pymultibinit.potential import HARTREE_TO_EV as HA, BOHR_TO_ANGSTROM as BOHR
 
 _WORKSPACE = Path(__file__).resolve().parents[2]
 _DDB_PATHS = {

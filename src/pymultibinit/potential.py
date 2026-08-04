@@ -11,16 +11,18 @@ Supports two backends:
 import numpy as np
 from typing import Optional, Tuple, Literal, List, Protocol
 import warnings
+from ase.units import Bohr as _BOHR_A, Hartree as _HARTREE_EV
 from .atom_matching import (
     find_atom_mapping_pbc,
     apply_mapping_to_positions,
     apply_inverse_mapping_to_forces,
 )
 
-# Unit conversion constants
-BOHR_TO_ANGSTROM = 0.529177210903
+# Unit conversion constants -- sourced from ASE so pymultibinit and ASE always
+# agree (both CODATA 2014: Hartree = 27.211386024..., Bohr = 0.5291772105...).
+BOHR_TO_ANGSTROM = _BOHR_A
 ANGSTROM_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM
-HARTREE_TO_EV = 27.211386245988
+HARTREE_TO_EV = _HARTREE_EV
 EV_TO_HARTREE = 1.0 / HARTREE_TO_EV
 
 
