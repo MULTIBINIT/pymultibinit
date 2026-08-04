@@ -892,10 +892,10 @@ def _precompute_dipdip_real_terms(
     diag_val = (4.0 / 3.0 / np.pi**0.5) * (reta**3) * inv_det_eps * inv_eps.T
     diff_tau = xcart[:, np.newaxis, :] - xcart[np.newaxis, :, :]
 
-    # Vectorized over all (r, i, j). The block formula factorizes:
-    #   block[m, b, e] = sum_{a,c,d,f} Z_i[m,a,b] D[m,c,d] Z_j[m,e,f]
-    #                   = (sum_a Z_i) * (sum_cd D) * (sum_f Z_j)
-    # so only the scalar sum of D over both indices is needed, not the 3x3.
+    # Vectorized over all (r, i, j). The block is the matrix triple product
+    #   block[r, pair, mu, nu] = sum_{a,b} Z_i[pair,a,mu] * D[r,pair,a,b] * Z_j[pair,b,nu]
+    # i.e. Z_i.T @ D @ Z_j for each (r, pair). This MUST contract the 3x3 matrix
+    # indices (a, b) -- summing D to a scalar (as a prior version did) is wrong.
     nR = len(r_indices)
     natom2 = natom * natom
     idx_i, idx_j = np.divmod(np.arange(natom2), natom)
@@ -917,17 +917,18 @@ def _precompute_dipdip_real_terms(
         term5 = 3.0 * term2 + term3 * (3.0 + 2.0 * y**2)
 
         scaled_r = np.einsum("mpj,ij->mpi", rij2, inv_eps)       # (nR, N, 3)
-        dyddt_sum = (
-            term5 * (scaled_r.sum(-1) ** 2) / (r_eps_r + 1e-18)
-            + term4 * inv_eps.T.sum()
+        # Full dyadic tensor D[r, pair, a, b] (NOT summed to a scalar).
+        scaled_outer = np.einsum("mpa,mpb->mpab", scaled_r, scaled_r)
+        dyddt = (
+            term5[:, :, None, None] * scaled_outer / (r_eps_r[:, :, None, None] + 1e-18)
+            + term4[:, :, None, None] * inv_eps.T[None, None, :, :]
         )
-    dyddt_sum *= -(reta**3) * inv_det_eps
+    dyddt *= -(reta**3) * inv_det_eps
 
-    # (sum_a Z_i[m,a,b]) * (sum_f Z_j[m,e,f]) broadcast over r via dyddt_sum
-    zsum_i = zeff[idx_i].sum(axis=1)                             # (N, 3)
-    zsum_j = zeff[idx_j].sum(axis=2)                             # (N, 3)
-    blocks = zsum_i[:, :, None] * zsum_j[:, None, :]             # (N, 3, 3)
-    blocks_all = blocks[None] * dyddt_sum[:, :, None, None]      # (nR, N, 3, 3)
+    # Correct matrix triple product: Z_i.T @ D @ Z_j, contracting (a, b).
+    zeff_i = zeff[idx_i]                                         # (N, 3, 3) [pair, a, mu]
+    zeff_j = zeff[idx_j]                                         # (N, 3, 3) [pair, b, nu]
+    blocks_all = np.einsum("pam,rpab,pbn->rpmn", zeff_i, dyddt, zeff_j)
 
     blk2 = blocks_all.reshape(-1, 3, 3)
     r_idx2 = np.repeat(np.arange(nR), natom2)
