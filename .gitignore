@@ -13,6 +13,9 @@ examples/BaHfO3_training/real_training_run/
 # vim files
 *.swp
 
+# Scratch / test-output directory (never commit)
+.tmp/
+
 # Latex
 *.aux
 
