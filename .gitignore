@@ -7,6 +7,9 @@ uv.lock
 # MemNotes knowledge vault (project-local, not part of package)
 memnotes/
 
+# Training run artifacts (large generated outputs — never commit)
+examples/BaHfO3_training/real_training_run/
+
 # vim files
 *.swp
 
