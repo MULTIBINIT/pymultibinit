@@ -19,17 +19,17 @@ from pathlib import Path
 from typing import Optional
 
 
-def export_reference(config_file: str, output_file: str, 
+def export_reference(config_file: str, output_file: str,
                     format: Optional[str] = None,
                     symbols: Optional[str] = None,
                     from_structure: Optional[str] = None,  # Keep for backward compat, but ignore
                     verbose: bool = False) -> int:
     """
     Export MULTIBINIT reference unit cell structure to file.
-    
+
     This exports the unit cell (reference structure) directly from the
     potential without requiring evaluation.
-    
+
     Parameters
     ----------
     config_file : str
@@ -45,7 +45,7 @@ def export_reference(config_file: str, output_file: str,
         Deprecated - kept for backward compatibility but ignored
     verbose : bool
         Print detailed information
-        
+
     Returns
     -------
     exit_code : int
@@ -54,27 +54,27 @@ def export_reference(config_file: str, output_file: str,
     try:
         from pymultibinit import MultibinitPotential  # type: ignore
         from ase.io import read, write
-        
+
     except ImportError as e:
         print(f"Error: Required package not installed: {e}", file=sys.stderr)
         print("Please install: pip install pymultibinit ase", file=sys.stderr)
         return 1
-    
+
     try:
         # Load potential
         if verbose:
             print(f"Loading potential from: {config_file}")
         pot = MultibinitPotential.from_config_file(config_file)
-        
+
         if verbose:
             print("✓ Potential initialized")
-        
+
         # Export the reference unit cell structure (no evaluation needed!)
         if verbose:
             print("Extracting reference unit cell structure...")
-        
+
         atoms_ref = pot.export_reference_to_ase()
-        
+
         if verbose:
             print(f"✓ Extracted reference structure: {len(atoms_ref)} atoms")
             cell = atoms_ref.get_cell()
@@ -82,7 +82,7 @@ def export_reference(config_file: str, output_file: str,
             for i in range(3):
                 vec = cell[i]
                 print(f"    a{i+1} = [{vec[0]:10.6f}, {vec[1]:10.6f}, {vec[2]:10.6f}] Å")
-        
+
         # Set chemical symbols if provided
         if symbols:
             symbol_list = [s.strip() for s in symbols.split(',')]
@@ -94,21 +94,21 @@ def export_reference(config_file: str, output_file: str,
                 atoms_ref.set_chemical_symbols(symbol_list)
                 if verbose:
                     print(f"✓ Set chemical symbols")
-        
+
         # Write to file
         if verbose:
             print(f"Writing to: {output_file}")
             if format:
                 print(f"Format: {format}")
-        
+
         write(output_file, atoms_ref, format=format)  # type: ignore
-        
+
         if verbose:
             print("✓ Structure exported successfully")
-        
+
         pot.free()
         return 0
-        
+
     except FileNotFoundError as e:
         print(f"Error: File not found: {e}", file=sys.stderr)
         return 1
@@ -126,9 +126,9 @@ def make_supercell(unit_cell_file: str, output_file: str,
                   verbose: bool = False) -> int:
     """
     Create supercell from unit cell structure file.
-    
+
     Simple utility to create supercells matching the ncell parameter.
-    
+
     Parameters
     ----------
     unit_cell_file : str
@@ -141,7 +141,7 @@ def make_supercell(unit_cell_file: str, output_file: str,
         Output format (auto-detected from extension if not provided)
     verbose : bool
         Print detailed information
-        
+
     Returns
     -------
     exit_code : int
@@ -149,21 +149,21 @@ def make_supercell(unit_cell_file: str, output_file: str,
     """
     try:
         from ase.io import read, write
-        
+
     except ImportError as e:
         print(f"Error: Required package not installed: {e}", file=sys.stderr)
         print("Please install: pip install ase", file=sys.stderr)
         return 1
-    
+
     try:
         # Read unit cell
         if verbose:
             print(f"Reading unit cell from: {unit_cell_file}")
-        
+
         unit_cell = read(unit_cell_file)
-        
+
         natom_unit = len(unit_cell)
-        
+
         if verbose:
             print(f"✓ Unit cell: {natom_unit} atoms")
             symbols = unit_cell.get_chemical_symbols()  # type: ignore
@@ -173,14 +173,14 @@ def make_supercell(unit_cell_file: str, output_file: str,
             for i in range(3):
                 vec = cell[i]  # type: ignore
                 print(f"    a{i+1} = [{vec[0]:10.6f}, {vec[1]:10.6f}, {vec[2]:10.6f}] Å")
-        
+
         # Create supercell
         if verbose:
             print(f"Building {nx}×{ny}×{nz} supercell...")
-        
+
         supercell = unit_cell * (nx, ny, nz)  # type: ignore
         natom_super = len(supercell)
-        
+
         if verbose:
             print(f"✓ Supercell: {natom_super} atoms ({natom_unit} × {nx}×{ny}×{nz})")
             cell = supercell.get_cell()  # type: ignore
@@ -188,23 +188,23 @@ def make_supercell(unit_cell_file: str, output_file: str,
             for i in range(3):
                 vec = cell[i]  # type: ignore
                 print(f"    a{i+1} = [{vec[0]:10.6f}, {vec[1]:10.6f}, {vec[2]:10.6f}] Å")
-        
+
         # Write supercell
         if verbose:
             print(f"Writing to: {output_file}")
             if format:
                 print(f"Format: {format}")
-        
+
         write(output_file, supercell, format=format)  # type: ignore
-        
+
         if verbose:
             print("✓ Supercell structure created successfully")
             print(f"\nThis structure matches ncell={nx} {ny} {nz} and can be used for:")
             print(f"  - Evaluating the potential")
             print(f"  - As --from-structure input for 'mbtools export-ref'")
-        
+
         return 0
-        
+
     except FileNotFoundError as e:
         print(f"Error: File not found: {e}", file=sys.stderr)
         return 1
@@ -290,7 +290,8 @@ def train_model(ddb: str, hist: str, config: Optional[str] = None,
 def train_model_python(ddb: str, hist: str, basis_xml: str, output_xml: str,
                        diagnostics_json: str, ncell: tuple[int, int, int],
                        selection: str = "all", ncoeff: Optional[int] = None,
-                       regularization: float = 0.0, verbose: bool = False) -> int:
+                       regularization: float = 0.0, verbose: bool = False,
+                       min_pure_strain_ratio: float = 0.05) -> int:
     """Fit a MULTIBINIT XML model using the pure-Python pipeline."""
     try:
         from pymultibinit.training import PythonFitConfig, fit_multibinit_model_python
@@ -299,7 +300,13 @@ def train_model_python(ddb: str, hist: str, basis_xml: str, output_xml: str,
         return 1
 
     try:
-        config = PythonFitConfig(ncell=ncell, selection=selection, ncoeff=ncoeff, regularization=regularization)
+        config = PythonFitConfig(
+            ncell=ncell,
+            selection=selection,
+            ncoeff=ncoeff,
+            regularization=regularization,
+            min_pure_strain_ratio=min_pure_strain_ratio,
+        )
         result = fit_multibinit_model_python(
             ddb=ddb,
             hist=hist,
@@ -369,8 +376,8 @@ Examples:
   # Build supercell from unit cell (matches ncell in config)
   mbtools make-supercell unit_cell.cif supercell.cif 2 2 2 --verbose
   mbtools make-supercell POSCAR POSCAR_222 2 2 2 -f vasp
-  
-  # Export MULTIBINIT internal reference structure  
+
+  # Export MULTIBINIT internal reference structure
   mbtools export-ref config.conf structure.cif --verbose
   mbtools export-ref config.conf structure.xyz -f xyz -s "Ba,Ti,O,O,O"
   mbtools export-ref config.conf ref.cif --from-structure supercell.cif
@@ -386,9 +393,9 @@ Examples:
 For more information, see: https://github.com/abinit/pymultibinit
         """
     )
-    
+
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
+
     # export-ref subcommand
     export_parser = subparsers.add_parser(
         'export-ref',
@@ -419,7 +426,7 @@ Examples:
                                    'Recommended when C API does not expose structure directly.')
     export_parser.add_argument('--verbose', '-v', action='store_true',
                               help='Print detailed information')
-    
+
     # make-supercell subcommand
     supercell_parser = subparsers.add_parser(
         'make-supercell',
@@ -520,28 +527,34 @@ Examples:
     train_python_parser.add_argument('--selection', choices=('all', 'greedy'), default='all', help='Coefficient selection mode')
     train_python_parser.add_argument('--ncoeff', type=int, default=None, help='Number of coefficients for greedy selection')
     train_python_parser.add_argument('--regularization', type=float, default=0.0, help='Ridge regularization strength')
+    train_python_parser.add_argument(
+        '--min-pure-strain-ratio',
+        type=float,
+        default=0.05,
+        help='Minimum pure-strain fraction reserved by greedy selection',
+    )
     train_python_parser.add_argument('--verbose', '-v', action='store_true', help='Print detailed information')
-    
+
     # Parse arguments
     args = parser.parse_args()
-    
+
     # Check if command was provided
     if not args.command:
         parser.print_help()
         return 1
-    
+
     # Execute command
     if args.command == 'export-ref':
         # Check if config file exists
         if not Path(args.config_file).exists():
             print(f"Error: Config file not found: {args.config_file}", file=sys.stderr)
             return 1
-        
+
         # Check if from_structure exists
         if args.from_structure and not Path(args.from_structure).exists():
             print(f"Error: Structure file not found: {args.from_structure}", file=sys.stderr)
             return 1
-        
+
         return export_reference(
             args.config_file,
             args.output_file,
@@ -550,18 +563,18 @@ Examples:
             from_structure=args.from_structure,
             verbose=args.verbose
         )
-    
+
     elif args.command == 'make-supercell':
         # Check if unit cell file exists
         if not Path(args.unit_cell_file).exists():
             print(f"Error: Unit cell file not found: {args.unit_cell_file}", file=sys.stderr)
             return 1
-        
+
         # Validate dimensions
         if args.nx <= 0 or args.ny <= 0 or args.nz <= 0:
             print(f"Error: Supercell dimensions must be positive integers", file=sys.stderr)
             return 1
-        
+
         return make_supercell(
             args.unit_cell_file,
             args.output_file,
@@ -633,9 +646,10 @@ Examples:
             selection=args.selection,
             ncoeff=args.ncoeff,
             regularization=args.regularization,
+            min_pure_strain_ratio=args.min_pure_strain_ratio,
             verbose=args.verbose,
         )
-    
+
     else:
         print(f"Error: Unknown command: {args.command}", file=sys.stderr)
         parser.print_help()

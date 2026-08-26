@@ -108,6 +108,7 @@ def test_python_fit_config_defaults_and_validation():
     assert config.ncoeff is None
     assert config.cutoff is None
     assert config.power_range == (3, 4)
+    assert config.min_pure_strain_ratio == 0.05
 
     with pytest.raises(ValueError, match="ncell values must be positive"):
         PythonFitConfig(ncell=(2, 0, 2))
@@ -117,6 +118,16 @@ def test_python_fit_config_defaults_and_validation():
         PythonFitConfig(ncell=(1, 1, 1), regularization=-1.0)
     with pytest.raises(ValueError, match="power_range must be ordered"):
         PythonFitConfig(ncell=(1, 1, 1), power_range=(4, 3))
+    with pytest.raises(ValueError, match="min_pure_strain_ratio must be finite"):
+        PythonFitConfig(ncell=(1, 1, 1), min_pure_strain_ratio=np.nan)
+    with pytest.raises(ValueError, match="min_pure_strain_ratio must be in \\[0, 1\\]"):
+        PythonFitConfig(ncell=(1, 1, 1), min_pure_strain_ratio=1.1)
+    with pytest.raises(ValueError, match="include_pure_strain=False is inconsistent"):
+        PythonFitConfig(ncell=(1, 1, 1), selection="greedy", include_pure_strain=False)
+    with pytest.raises(ValueError, match="include_pure_strain=False is inconsistent"):
+        PythonFitConfig(ncell=(1, 1, 1), selection="screened_greedy", include_pure_strain=False)
+    PythonFitConfig(ncell=(1, 1, 1), selection="all", include_pure_strain=False)
+    PythonFitConfig(ncell=(1, 1, 1), selection="lasso", include_pure_strain=False)
 
 
 def test_read_hist_frames_loads_abinit_units_and_shapes(tmp_path):
@@ -470,6 +481,10 @@ def test_xml_basis_adapter_preserves_terms_and_round_trips(tmp_path):
     assert coeffs[0].terms[0].strains[0] == {"power": 1, "voigt": 4}
 
 
+@pytest.mark.skipif(
+    not (Path(__file__).parent.parent / "examples/BaHfO3_training/real_training_run/wrapper_run_qgrid/BaTiO3_fit_coeffs.xml").exists(),
+    reason="real_training_run fixture data is not tracked (large artifacts)",
+)
 def test_xml_basis_adapter_preserves_batio3_counts():
     xml = Path(__file__).parent.parent / "examples/BaHfO3_training/real_training_run/wrapper_run_qgrid/BaTiO3_fit_coeffs.xml"
     parsed = read_coefficient_xml(xml)
@@ -577,6 +592,10 @@ def test_evaluate_basis_features_handles_strain_stress_feature():
     np.testing.assert_allclose(features.stress[0, :, 0], [0.36, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 
+@pytest.mark.skipif(
+    not (Path(__file__).parent.parent / "examples/BaHfO3_training/real_training_run/wrapper_run_qgrid/BaTiO3_fit_coeffs.xml").exists(),
+    reason="real_training_run fixture data is not tracked (large artifacts)",
+)
 def test_evaluate_xml_loaded_basis_shapes_with_multiple_frames():
     xml = Path(__file__).parent.parent / "examples/BaHfO3_training/real_training_run/wrapper_run_qgrid/BaTiO3_fit_coeffs.xml"
     basis = load_xml_basis(xml)[:3]
@@ -622,11 +641,14 @@ def test_evaluate_basis_features_uses_supercell_builder_cell_order():
     assert features.energy[0, 0] == pytest.approx(128.0)
 
 
-def test_fit_multibinit_model_python_wires_pipeline_without_subprocess(tmp_path, monkeypatch):
+@pytest.mark.parametrize("selection", ["greedy", "lasso", "all"])
+def test_fit_multibinit_model_python_wires_netcdf_writer_without_subprocess(
+    tmp_path, monkeypatch, selection
+):
     ddb = tmp_path / "input.ddb"
     hist = tmp_path / "training_HIST.nc"
     basis_xml = tmp_path / "basis.xml"
-    output_xml = tmp_path / "fitted.xml"
+    output_xml = tmp_path / "fitted.nc"
     ddb.write_text("ddb placeholder", encoding="utf-8")
     _write_force_fit_hist(hist)
     basis_xml.write_text(
@@ -660,14 +682,19 @@ def test_fit_multibinit_model_python_wires_pipeline_without_subprocess(tmp_path,
         hist=hist,
         basis_xml=basis_xml,
         output_xml=output_xml,
-        config=PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), selection="greedy", ncoeff=1),
+        config=PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), selection=selection, ncoeff=1, min_pure_strain_ratio=0.0),
     )
 
     assert result.output_xml == str(output_xml.resolve())
     assert result.ncoeff == 1
     assert result.nframes == 1
     np.testing.assert_allclose(result.coefficients, [-2.0])
-    assert read_coefficient_xml(output_xml)[0].value == pytest.approx(-2.0)
+    from netCDF4 import Dataset
+
+    with Dataset(output_xml) as nc:
+        np.testing.assert_allclose(nc.variables["value"][:], [-2.0])
+        assert nc.getncattr("generator_version") == training_mod.FORTRAN_ANCHORED_GENERATOR_TAG
+        assert nc.getncattr("basis_fingerprint")
 
 
 def test_fit_multibinit_model_python_reports_missing_paths(tmp_path):
@@ -695,13 +722,208 @@ def test_select_greedy_coefficients_chooses_expected_terms_deterministically():
     result = select_greedy_coefficients(
         features,
         dataset,
-        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=2, selection="greedy"),
+        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=2, selection="greedy", min_pure_strain_ratio=0.0),
     )
 
     assert result.selected == (1, 0)
     np.testing.assert_allclose(result.coefficients, [2.0, 3.0, 0.0], atol=1e-12)
     assert len(result.steps) == 2
     assert result.steps[-1]["train_rmse"]["forces_ha_bohr"] == pytest.approx(0.0)
+
+
+def test_pure_strain_classifier_uses_structured_terms():
+    pure = XmlBasisFunction(
+        number=1,
+        value=0.0,
+        text="not-used",
+        terms=(
+            {"weight": 1.0, "displacements": (), "strains": ({"voigt": 1, "power": 1},)},
+            {"weight": 1.0, "displacements": (), "strains": ({"voigt": 2, "power": 1},)},
+        ),
+    )
+    mixed = XmlBasisFunction(
+        number=2,
+        value=0.0,
+        text="eta",
+        terms=({"weight": 1.0, "displacements": ({"direction": "x"},), "strains": ({"voigt": 1, "power": 1},)},),
+    )
+    empty = XmlBasisFunction(number=3, value=0.0, text="eta", terms=())
+
+    assert training_mod.is_pure_strain_basis_function(pure)
+    assert not training_mod.is_pure_strain_basis_function(mixed)
+    assert not training_mod.is_pure_strain_basis_function(empty)
+    assert training_mod.pure_strain_basis_indices([pure, mixed, empty]) == (0,)
+
+
+def test_greedy_reserves_default_pure_strain_quota_for_final_steps():
+    ncoeff = 40
+    features = FitFeatureMatrices(
+        energy=np.eye(ncoeff),
+        forces=np.zeros((ncoeff, 1, 3, ncoeff)),
+        stress=np.zeros((ncoeff, 6, ncoeff)),
+    )
+    dataset = _dataset_for_solver(
+        ntime=ncoeff,
+        energy_diff=np.arange(1.0, ncoeff + 1.0),
+    )
+
+    result = select_greedy_coefficients(
+        features,
+        dataset,
+        PythonFitConfig(
+            ncell=(1, 1, 1),
+            fit_on=(False, False, True),
+            ncoeff=ncoeff,
+            selection="greedy",
+        ),
+        pure_strain_indices=(38, 39),
+    )
+
+    assert set(result.selected[-2:]) == {38, 39}
+    assert not set(result.selected[:-2]) & {38, 39}
+
+
+def test_greedy_zero_pure_strain_ratio_disables_structural_requirement():
+    features = FitFeatureMatrices(
+        energy=np.zeros((1, 2)),
+        forces=np.array([[[[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]]]),
+        stress=np.zeros((1, 6, 2)),
+    )
+    dataset = _dataset_for_solver(force_diff=np.array([[[2.0, 3.0, 0.0]]]))
+
+    result = select_greedy_coefficients(
+        features,
+        dataset,
+        PythonFitConfig(
+            ncell=(1, 1, 1),
+            fit_on=(True, False, False),
+            ncoeff=2,
+            selection="greedy",
+            min_pure_strain_ratio=0.0,
+        ),
+    )
+
+    assert result.selected == (1, 0)
+
+
+def test_greedy_rejects_insufficient_pure_strain_candidates():
+    ncoeff = 40
+    features = FitFeatureMatrices(
+        energy=np.eye(ncoeff),
+        forces=np.zeros((ncoeff, 1, 3, ncoeff)),
+        stress=np.zeros((ncoeff, 6, ncoeff)),
+    )
+    dataset = _dataset_for_solver(ntime=ncoeff)
+
+    with pytest.raises(ValueError, match="pure-strain requirement needs 2 selectable pure-strain"):
+        select_greedy_coefficients(
+            features,
+            dataset,
+            PythonFitConfig(
+                ncell=(1, 1, 1),
+                fit_on=(False, False, True),
+                ncoeff=ncoeff,
+                selection="greedy",
+            ),
+            pure_strain_indices=(39,),
+        )
+
+    with pytest.raises(ValueError, match="no structural pure-strain coefficients"):
+        select_greedy_coefficients(
+            features,
+            dataset,
+            PythonFitConfig(
+                ncell=(1, 1, 1),
+                fit_on=(False, False, True),
+                ncoeff=ncoeff,
+                selection="greedy",
+            ),
+            pure_strain_indices=(),
+        )
+
+
+def test_greedy_rejects_preselected_conflict_with_terminal_reservation():
+    features = FitFeatureMatrices(energy=np.eye(3), forces=np.zeros((3, 1, 3, 3)), stress=np.zeros((3, 6, 3)))
+    dataset = _dataset_for_solver(ntime=3)
+
+    with pytest.raises(ValueError, match="insufficient remaining selections"):
+        select_greedy_coefficients(
+            features,
+            dataset,
+            PythonFitConfig(
+                ncell=(1, 1, 1),
+                fit_on=(False, False, True),
+                ncoeff=2,
+                selection="greedy",
+            ),
+            preselected={0, 1},
+            pure_strain_indices=(2,),
+        )
+
+
+def test_greedy_keeps_terminal_reservation_with_scarce_non_pure_candidates():
+    features = FitFeatureMatrices(energy=np.eye(5), forces=np.zeros((5, 1, 3, 5)), stress=np.zeros((5, 6, 5)))
+    dataset = _dataset_for_solver(ntime=5, energy_diff=np.ones(5))
+
+    result = select_greedy_coefficients(
+        features,
+        dataset,
+        PythonFitConfig(
+            ncell=(1, 1, 1),
+            fit_on=(False, False, True),
+            ncoeff=5,
+            selection="greedy",
+        ),
+        pure_strain_indices=(0, 1, 2),
+    )
+
+    assert result.selected[-1] in {0, 1, 2}
+    assert result.selected[-2:] == (4, 2)
+
+
+def test_greedy_falls_back_to_pure_when_preferred_non_pure_candidates_are_singular():
+    energy = np.eye(5)
+    energy[:, 0] = 0.0
+    energy[:, 1] = 0.0
+    features = FitFeatureMatrices(energy=energy, forces=np.zeros((5, 1, 3, 5)), stress=np.zeros((5, 6, 5)))
+    dataset = _dataset_for_solver(ntime=5, energy_diff=np.ones(5))
+
+    result = select_greedy_coefficients(
+        features,
+        dataset,
+        PythonFitConfig(
+            ncell=(1, 1, 1),
+            fit_on=(False, False, True),
+            ncoeff=3,
+            selection="greedy",
+        ),
+        pure_strain_indices=(2, 3, 4),
+    )
+
+    assert set(result.selected) == {2, 3, 4}
+    assert result.selected[-1] in {2, 3, 4}
+    assert result.steps[0]["skipped_singular"] >= 2
+
+    scarce_energy = np.eye(4)
+    scarce_energy[:, 0] = 0.0
+    scarce_energy[:, 1] = 0.0
+    scarce_features = FitFeatureMatrices(
+        energy=scarce_energy, forces=np.zeros((4, 1, 3, 4)), stress=np.zeros((4, 6, 4))
+    )
+    scarce_dataset = _dataset_for_solver(ntime=4, energy_diff=np.ones(4))
+
+    with pytest.raises(ValueError, match="Unable to select requested ncoeff"):
+        select_greedy_coefficients(
+            scarce_features,
+            scarce_dataset,
+            PythonFitConfig(
+                ncell=(1, 1, 1),
+                fit_on=(False, False, True),
+                ncoeff=3,
+                selection="greedy",
+            ),
+            pure_strain_indices=(2, 3),
+        )
 
 
 def test_select_greedy_coefficients_reports_validation_rmse():
@@ -716,7 +938,7 @@ def test_select_greedy_coefficients_reports_validation_rmse():
     result = select_greedy_coefficients(
         features,
         dataset,
-        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=1, selection="greedy"),
+        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=1, selection="greedy", min_pure_strain_ratio=0.0),
         validation_features=features,
         validation_dataset=validation,
     )
@@ -740,12 +962,39 @@ def test_select_greedy_coefficients_large_basis_path_matches_expected_terms():
     result = select_greedy_coefficients(
         features,
         dataset,
-        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=2, selection="greedy"),
+        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=2, selection="greedy", min_pure_strain_ratio=0.0),
     )
 
     assert result.selected == (999, 1000)
     np.testing.assert_allclose(result.coefficients[[999, 1000]], [3.0, 2.0], atol=1e-12)
     assert result.steps[-1]["train_rmse"]["forces_ha_bohr"] == pytest.approx(0.0)
+
+def test_large_greedy_reserves_terminal_pure_strain_quota():
+    forces = np.zeros((1, 1, 3, 1001))
+    forces[0, 0, 0, 0] = 1.0
+    forces[0, 0, 1, 1000] = 1.0
+    features = FitFeatureMatrices(
+        energy=np.zeros((1, 1001)),
+        forces=forces,
+        stress=np.zeros((1, 6, 1001)),
+    )
+    dataset = _dataset_for_solver(force_diff=np.array([[[2.0, 3.0, 0.0]]]))
+
+    result = select_greedy_coefficients(
+        features,
+        dataset,
+        PythonFitConfig(
+            ncell=(1, 1, 1),
+            fit_on=(True, False, False),
+            ncoeff=2,
+            selection="greedy",
+            min_pure_strain_ratio=0.5,
+        ),
+        pure_strain_indices=(1000,),
+    )
+
+    assert result.selected == (0, 1000)
+    np.testing.assert_allclose(result.coefficients[[0, 1000]], [2.0, 3.0], atol=1e-12)
 
 
 def test_fit_screened_greedy_uses_screening_weights_and_candidate_pool(monkeypatch):
@@ -808,6 +1057,7 @@ def test_fit_screened_greedy_uses_screening_weights_and_candidate_pool(monkeypat
             candidate_pool_size=2,
             feature_chunk_size=2,
             screening_frame_count=2,
+            min_pure_strain_ratio=0.0,
         ),
         weights=np.array([1.0, 2.0, 3.0, 4.0]),
     )
@@ -817,6 +1067,76 @@ def test_fit_screened_greedy_uses_screening_weights_and_candidate_pool(monkeypat
     assert result.selected == (1,)
     assert result.coefficients[1] == pytest.approx(5.0)
     assert result.steps[0]["screened_pool_size"] == 2
+
+
+def test_screened_greedy_forces_pure_strain_candidates_into_pool(monkeypatch):
+    dataset = training_mod.TrainingDataset(
+        displacement=np.zeros((1, 1, 3)),
+        du_delta=np.zeros((1, 6, 1, 3)),
+        strain=np.zeros((1, 6)),
+        ucvol=np.ones(1),
+        sqomega=np.ones(1),
+        energy_diff=np.zeros(1),
+        force_diff=np.zeros((1, 1, 3)),
+        stress_diff=np.zeros((1, 6)),
+    )
+    non_pure_term = {"weight": 1.0, "displacements": ({"direction": "x"},), "strains": ()}
+    pure_term = {"weight": 1.0, "displacements": (), "strains": ({"voigt": 1, "power": 1},)}
+    basis = [
+        XmlBasisFunction(number=index + 1, value=0.0, text="", terms=(term,))
+        for index, term in enumerate((non_pure_term, non_pure_term, pure_term, pure_term))
+    ]
+    seen = {}
+
+    def fake_evaluate_basis_features(chunk_basis, chunk_dataset, ncell, backend="auto", memmap_dir=None):
+        seen.setdefault("basis_batches", []).append(tuple(chunk_basis))
+        ntime = chunk_dataset.displacement.shape[0]
+        ncoeff = len(chunk_basis)
+        return FitFeatureMatrices(
+            energy=np.zeros((ntime, ncoeff)),
+            forces=np.zeros((ntime, 1, 3, ncoeff)),
+            stress=np.zeros((ntime, 6, ncoeff)),
+        )
+
+    def fake_rhs_diagonal_target(features, chunk_dataset, config, weights):
+        ncoeff = features.energy.shape[1]
+        return np.arange(ncoeff, 0, -1, dtype=float), np.ones(ncoeff), 1.0
+
+    def fake_select_greedy_coefficients(features, full_dataset, config, weights=None, pure_strain_indices=None):
+        seen["pool_pure_indices"] = pure_strain_indices
+        return training_mod.GreedySelectionResult(
+            selected=(0, 1),
+            coefficients=np.array([5.0, 6.0]),
+            diagnostics=training_mod.FitDiagnostics(
+                goal=training_mod.GoalFunctionComponents(0.0, 0.0, 0.0, 0.0),
+                residual_norm=0.0,
+                matrix_rank=2,
+                condition_number=1.0,
+                regularization=0.0,
+                info=0,
+            ),
+            steps=({"selected": 0}, {"selected": 1}),
+        )
+
+    monkeypatch.setattr(training_mod, "evaluate_basis_features", fake_evaluate_basis_features)
+    monkeypatch.setattr(training_mod, "_greedy_rhs_diagonal_target", fake_rhs_diagonal_target)
+    monkeypatch.setattr(training_mod, "select_greedy_coefficients", fake_select_greedy_coefficients)
+
+    result = training_mod._fit_screened_greedy(
+        basis,
+        dataset,
+        PythonFitConfig(
+            ncell=(1, 1, 1),
+            selection="screened_greedy",
+            ncoeff=2,
+            candidate_pool_size=2,
+        ),
+    )
+
+    assert len(seen["basis_batches"][-1]) == 2
+    assert any(item in seen["basis_batches"][-1] for item in basis[2:])
+    assert seen["pool_pure_indices"] == (1,)
+    assert result.selected == (0, 2)
 
 
 def test_select_greedy_coefficients_respects_constraints_and_singular_candidates():
@@ -830,7 +1150,7 @@ def test_select_greedy_coefficients_respects_constraints_and_singular_candidates
     result = select_greedy_coefficients(
         features,
         dataset,
-        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=2, selection="greedy"),
+        PythonFitConfig(ncell=(1, 1, 1), fit_on=(True, False, False), ncoeff=2, selection="greedy", min_pure_strain_ratio=0.0),
         banned={1},
         preselected={0},
     )
@@ -848,27 +1168,27 @@ def test_select_greedy_coefficients_rejects_impossible_constraints():
         select_greedy_coefficients(
             features,
             dataset,
-            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=1),
+            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=1, min_pure_strain_ratio=0.0),
             preselected={0, 1},
         )
     with pytest.raises(ValueError, match="Not enough selectable coefficients"):
         select_greedy_coefficients(
             features,
             dataset,
-            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=2),
+            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=2, min_pure_strain_ratio=0.0),
             banned={1},
         )
     with pytest.raises(ValueError, match="Unable to select requested ncoeff"):
         select_greedy_coefficients(
             features,
             dataset,
-            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=1),
+            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=1, min_pure_strain_ratio=0.0),
         )
     with pytest.raises(ValueError, match="Preselected coefficients produce a singular"):
         select_greedy_coefficients(
             features,
             dataset,
-            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=1),
+            PythonFitConfig(ncell=(1, 1, 1), selection="greedy", ncoeff=1, min_pure_strain_ratio=0.0),
             preselected={0},
         )
 
@@ -1117,16 +1437,65 @@ def test_mbtools_train_python_cli_writes_diagnostics(tmp_path, monkeypatch):
             "1",
             "1",
             "1",
+            "--min-pure-strain-ratio",
+            "0.2",
         ],
     )
 
     assert main() == 0
     assert calls["ddb"] == str(ddb)
     assert calls["basis_xml"] == str(basis)
+    assert calls["config"].min_pure_strain_ratio == 0.2
     data = json.loads(diagnostics.read_text(encoding="utf-8"))
     assert data["coefficients"] == [1.5]
     assert data["goal"]["force_stress"] == 1.0
     assert data["output_xml"] == str(output_xml)
+
+
+def test_train_model_python_keeps_positional_verbose_compatibility(tmp_path, monkeypatch):
+    from pymultibinit.cli import train_model_python
+
+    ddb = tmp_path / "input.ddb"
+    hist = tmp_path / "training_HIST.nc"
+    basis = tmp_path / "basis.xml"
+    output_xml = tmp_path / "fit.xml"
+    diagnostics = tmp_path / "fit.json"
+    ddb.write_text("ddb", encoding="utf-8")
+    hist.write_text("hist", encoding="utf-8")
+    basis.write_text("xml", encoding="utf-8")
+
+    fake_result = SimpleNamespace(
+        coefficients=np.array([1.5]),
+        output_xml=str(output_xml),
+        ncoeff=1,
+        nframes=2,
+        ddb=str(ddb),
+        hist=str(hist),
+        basis_xml=str(basis),
+        diagnostics=SimpleNamespace(
+            goal=SimpleNamespace(force_stress=1.0, force=0.5, stress=0.25, energy=0.125),
+            residual_norm=0.75,
+            matrix_rank=1,
+            condition_number=2.0,
+            regularization=0.0,
+            info=0,
+        ),
+    )
+    calls = {}
+
+    def fake_fit(**kwargs):
+        calls.update(kwargs)
+        return fake_result
+
+    monkeypatch.setattr("pymultibinit.training.fit_multibinit_model_python", fake_fit)
+
+    rc = train_model_python(
+        str(ddb), str(hist), str(basis), str(output_xml), str(diagnostics),
+        (1, 1, 1), "all", None, 0.0, True,
+    )
+
+    assert rc == 0
+    assert calls["config"].min_pure_strain_ratio == 0.05
 
 
 def test_train_python_diagnostics_json_is_strict_for_infinite_values(tmp_path):

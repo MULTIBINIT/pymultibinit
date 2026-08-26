@@ -35,6 +35,7 @@ result = fit_multibinit_model_python(
         regularization=1e-8,
         selection="greedy",
         ncoeff=20,
+        min_pure_strain_ratio=0.05,
     ),
 )
 ```
@@ -49,7 +50,8 @@ mbtools train-python system.DDB training_HIST.nc \
   --ncell 2 2 2 \
   --selection greedy \
   --ncoeff 20 \
-  --regularization 1e-8
+  --regularization 1e-8 \
+  --min-pure-strain-ratio 0.05
 ```
 
 ## Training Procedure
@@ -229,6 +231,14 @@ Constraints:
 - impossible requests fail fast.
 - singular candidate additions are skipped and counted in step diagnostics.
 - singular preselected sets raise a clear error.
+
+For `greedy` and `screened_greedy`, `min_pure_strain_ratio` defaults to `0.05`.
+It reserves `ceil(ncoeff * ratio)` structurally pure-strain selections at the tail
+when non-pure candidates permit it; explicit preselection or insufficient non-pure
+candidates can introduce them earlier while preserving the minimum. Every term in a
+pure-strain coefficient must contain strain factors and no displacement factors.
+Set the ratio to `0` to disable this constraint. A positive ratio requires
+`include_pure_strain=True` and enough such candidate terms.
 
 The public `fit_multibinit_model_python()` dispatches to greedy selection whenever `config.selection == "greedy"`.
 
