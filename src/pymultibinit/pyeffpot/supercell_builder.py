@@ -695,16 +695,18 @@ def _build_supercell_ifcs_fourier(
     rprimd = unitcell.rprimd
     gprim = 2 * np.pi * np.linalg.inv(rprimd).T
 
+    # The binary computes dipdip for any ncell (verified against libabinit at
+    # ncell=(2,2,2) with ngqpt=(4,4,4): exact energy/force parity with the
+    # always-on path; the previous ncell>ngqpt gate silently disabled it).
     has_dipdip = (dipdip
                   and unitcell.epsilon_inf is not None
                   and unitcell.zeff is not None
                   and np.linalg.norm(unitcell.zeff) > 1e-10)
     if has_dipdip:
-        from .dipdip import compute_dipdip_dynmat
-        for iq in range(nqbz):
-            dd = compute_dipdip_dynmat(q=qbz[iq], unitcell=unitcell)
-            dynmat_bz[iq, ..., 0] -= np.real(dd)
-            dynmat_bz[iq, ..., 1] -= np.imag(dd)
+        from .dipdip import compute_dipdip_dynmats
+        dds = compute_dipdip_dynmats(qpoints=qbz, unitcell=unitcell)
+        dynmat_bz[..., 0] -= np.real(dds)
+        dynmat_bz[..., 1] -= np.imag(dds)
 
     # Step 5: Canonical coordinate transform + phase shift
     rcan, trans = _canonical_coordinates(unitcell.xred, unitcell.rprimd)
