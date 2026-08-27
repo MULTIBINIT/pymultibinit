@@ -802,24 +802,15 @@ def _compute_dipdip_reciprocal_parts(
     volume: float,
     sumg0: int,
 ) -> np.ndarray:
-    """Efficient reciprocal-space dipdip for many q-points.
-
-    Uses the identity D_rec[i,mu,j,nu] = sum_g f(g) ZK[g,i,mu] conj(ZK[g,j,nu])
-    where ZK[g,i,mu] = sum_alpha zeff[i,alpha,mu] K[g,alpha] exp(iK·tau_i).
-    This avoids creating (nq, nG, natom, natom) phase intermediates.
-    """
     natom = unitcell.natom
     xcart = unitcell.xcart
     zeff = unitcell.zeff
     epsilon_inf = unitcell.epsilon_inf
     assert zeff is not None and epsilon_inf is not None
 
-    nq = len(qpoints)
-    ng = len(g_indices)
-
-    ks_red = qpoints[:, None, :] + g_indices[None, :, :]          # (nq, nG, 3)
-    ks_cart = np.einsum("qgi,ij->qgj", ks_red, rec_lattice)        # (nq, nG, 3)
-    k_eps_k = np.einsum("qgi,ij,qgj->qg", ks_cart, epsilon_inf, ks_cart)  # (nq, nG)
+    ks_red = qpoints[:, np.newaxis, :] + g_indices[np.newaxis, :, :]
+    ks_cart = np.einsum("qgi,ij->qgj", ks_red, rec_lattice)
+    k_eps_k = np.einsum("qgi,ij,qgj->qg", ks_cart, epsilon_inf, ks_cart)
 
     mask = k_eps_k > 1e-12
     if sumg0 == 0:
@@ -828,35 +819,20 @@ def _compute_dipdip_reciprocal_parts(
         if len(g0_idx) > 0 and np.any(gamma_q):
             mask[gamma_q, g0_idx[0]] = False
 
-    factor_rec = np.zeros((nq, ng), dtype=float)
+    factor_rec = np.zeros_like(k_eps_k, dtype=float)
     factor_rec[mask] = (
         (4.0 * np.pi / volume)
         * np.exp(-k_eps_k[mask] / (4.0 * eta_val))
         / k_eps_k[mask]
     )
-    factor_rec[~mask] = 0.0
 
-    # K · tau for all q, G: (nq, nG, natom)
-    k_dot_tau = np.einsum("qgi,ai->qga", ks_cart, xcart)
-    phase_i = np.exp(1j * k_dot_tau)                                # (nq, nG, natom)
-
-    # ZK[q, g, i, mu] = sum_alpha zeff[i, alpha, mu] * K[g, alpha] * phase[q, g, i]
-    # = einsum('iam,qga->qgim', zeff, phase_i_expanded)
-    # But K and phase can be combined: weighted_phase[q,g,i,alpha] = K[q,g,alpha] * phase[q,g,i]
-    # Then ZK = einsum('iam,qgia->qgim', zeff, K_phase)
-    K_phase = ks_cart[:, :, None, :] * phase_i[:, :, :, None]       # (nq, nG, natom, 3)
-    ZK = np.einsum("iam,qgia->qgim", zeff, K_phase)                 # (nq, nG, natom, 3)
-
-    # D_rec[q, i, mu, j, nu] = sum_g factor[q,g] * ZK[q,g,i,mu] * conj(ZK[q,g,j,nu])
-    # Equivalent einsum: np.einsum("qgim,qgjn->qimjn", wZK, ZK.conj())
-    # which is a contraction over g. Batched GEMM is much faster than einsum:
-    # reshape -> (q, natom*3, nG) @ (q, nG, natom*3) -> (q, natom*3, natom*3).
-    wZK = ZK * factor_rec[:, :, None, None]                         # (nq, nG, natom, 3)
-    wZK2 = wZK.transpose(0, 2, 3, 1).reshape(nq, natom * 3, ng)
-    ZKc2 = ZK.conj().reshape(nq, ng, natom * 3)
-    result = np.matmul(wZK2, ZKc2).reshape(nq, natom, 3, natom, 3)
-
-    return result
+    diff_tau = xcart[:, np.newaxis, :] - xcart[np.newaxis, :, :]
+    phases_rec = np.exp(1j * np.einsum("qgi,abi->qgab", ks_cart, diff_tau))
+    kks = np.einsum("qgi,qgj->qgij", ks_cart, ks_cart)
+    t_rec = np.einsum("qg,qgab,qgmn->qambn", factor_rec, phases_rec, kks)
+    return np.einsum("iam,qiajb,jbn->qimjn", zeff, t_rec, zeff).reshape(
+        len(qpoints), natom, 3, natom, 3
+    )
 
 
 def _precompute_dipdip_real_terms(
@@ -892,103 +868,53 @@ def _precompute_dipdip_real_terms(
     diag_val = (4.0 / 3.0 / np.pi**0.5) * (reta**3) * inv_det_eps * inv_eps.T
     diff_tau = xcart[:, np.newaxis, :] - xcart[np.newaxis, :, :]
 
-    # Vectorized over all (r, i, j). The block is the matrix triple product
-    #   block[r, pair, mu, nu] = sum_{a,b} Z_i[pair,a,mu] * D[r,pair,a,b] * Z_j[pair,b,nu]
-    # i.e. Z_i.T @ D @ Z_j for each (r, pair). This MUST contract the 3x3 matrix
-    # indices (a, b) -- summing D to a scalar (as a prior version did) is wrong.
-    nR = len(r_indices)
-    natom2 = natom * natom
-    idx_i, idx_j = np.divmod(np.arange(natom2), natom)
+    for ir, r_idx in enumerate(r_indices):
+        r_cart = r_idx @ rprimd
+        rij = r_cart[None, None, :] + diff_tau
 
-    r_cart = r_indices @ rprimd                                  # (nR, 3)
-    rij = r_cart[:, None, None, :] + diff_tau[None]              # (nR, i, j, 3)
-    rij2 = rij.reshape(nR, natom2, 3)
+        if np.all(r_idx == 0):
+            for iatom in range(natom):
+                real_blocks[ir, iatom, :, iatom, :] -= np.einsum(
+                    "mi,mn,np->ip", zeff[iatom], diag_val, zeff[iatom]
+                )
 
-    r_eps_r = np.einsum("mpi,ij,mpj->mp", rij2, inv_eps, rij2)   # (nR, N)
-    y = reta * np.sqrt(r_eps_r)
-    with np.errstate(divide="ignore", invalid="ignore"):
+            mask = np.ones((natom, natom), dtype=bool)
+            np.fill_diagonal(mask, False)
+        else:
+            mask = np.ones((natom, natom), dtype=bool)
+
+        if not np.any(mask):
+            continue
+
+        r_m = rij[mask]
+        r_eps_r = np.einsum("mi,ij,mj->m", r_m, inv_eps, r_m)
+        r_norm_eps = np.sqrt(r_eps_r)
+        y = reta * r_norm_eps
+
         invy = 1.0 / y
         erfc_y = erfc(y)
         exp_y2 = np.exp(-(y**2))
         fact_pi = 2.0 / np.sqrt(np.pi)
+
         term2 = erfc_y * invy**3
         term3 = fact_pi * exp_y2 * invy**2
         term4 = -(term2 + term3)
         term5 = 3.0 * term2 + term3 * (3.0 + 2.0 * y**2)
 
-        scaled_r = np.einsum("mpj,ij->mpi", rij2, inv_eps)       # (nR, N, 3)
-        # Full dyadic tensor D[r, pair, a, b] (NOT summed to a scalar).
-        scaled_outer = np.einsum("mpa,mpb->mpab", scaled_r, scaled_r)
-        dyddt = (
-            term5[:, :, None, None] * scaled_outer / (r_eps_r[:, :, None, None] + 1e-18)
-            + term4[:, :, None, None] * inv_eps.T[None, None, :, :]
+        scaled_r = r_m @ inv_eps.T
+        dyddt_m = (
+            term5[:, None, None]
+            * np.einsum("mi,mj->mij", scaled_r, scaled_r)
+            / (r_eps_r[:, None, None] + 1e-18)
+            + term4[:, None, None] * inv_eps.T[None, :, :]
         )
-    dyddt *= -(reta**3) * inv_det_eps
+        dyddt_m *= -(reta**3) * inv_det_eps
 
-    # Correct matrix triple product: Z_i.T @ D @ Z_j, contracting (a, b).
-    zeff_i = zeff[idx_i]                                         # (N, 3, 3) [pair, a, mu]
-    zeff_j = zeff[idx_j]                                         # (N, 3, 3) [pair, b, nu]
-    blocks_all = np.einsum("pam,rpab,pbn->rpmn", zeff_i, dyddt, zeff_j)
-
-    blk2 = blocks_all.reshape(-1, 3, 3)
-    r_idx2 = np.repeat(np.arange(nR), natom2)
-    i_idx2 = np.tile(idx_i, nR)
-    j_idx2 = np.tile(idx_j, nR)
-    zero_pos = np.where(np.all(r_indices == 0, axis=1))[0][0]
-    keep = (r_idx2 != zero_pos) | (i_idx2 != j_idx2)             # r=0 self-pairs excluded
-    np.add.at(
-        real_blocks,
-        (r_idx2[keep], i_idx2[keep], slice(None), j_idx2[keep], slice(None)),
-        blk2[keep],
-    )
-
-    # r=0 self-term: subtract zeff[i].T @ diag_val @ zeff[i] on the diagonal
-    self_term = np.einsum("ami,mn,anp->aip", zeff, diag_val, zeff)
-    real_blocks[zero_pos, np.arange(natom), :, np.arange(natom), :] -= self_term
+        idx_i, idx_j = np.where(mask)
+        for m, (ia, ib) in enumerate(zip(idx_i, idx_j)):
+            real_blocks[ir, ia, :, ib, :] += zeff[ia].T @ dyddt_m[m] @ zeff[ib]
 
     return r_indices, real_blocks
-
-
-_jax_recip_jit = None
-
-
-def _get_jax_recip():
-    """Return a module-level cached JAX JIT of the reciprocal part, or None."""
-    global _jax_recip_jit
-    if _jax_recip_jit is not None:
-        return _jax_recip_jit
-    try:
-        import jax
-        import jax.numpy as jnp
-
-        jax.config.update("jax_enable_x64", True)
-
-        @jax.jit(static_argnums=(8,))
-        def _jax_recip(qpoints, g_indices, rec_lattice, epsilon_inf, volume,
-                       eta_val, xcart, zeff, sumg0):
-            ks_red = qpoints[:, None, :] + g_indices[None, :, :]
-            ks_cart = jnp.einsum("qgi,ij->qgj", ks_red, rec_lattice)
-            k_eps_k = jnp.einsum("qgi,ij,qgj->qg", ks_cart, epsilon_inf, ks_cart)
-            factor = jnp.where(
-                k_eps_k > 1e-12,
-                (4.0 * jnp.pi / volume) * jnp.exp(-k_eps_k / (4.0 * eta_val)) / k_eps_k,
-                0.0,
-            )
-            if sumg0 == 0:
-                gamma_q = jnp.linalg.norm(qpoints, axis=1) < 1e-12
-                g0_mask = jnp.all(g_indices == 0, axis=1)
-                factor = jnp.where(gamma_q[:, None] & g0_mask[None, :], 0.0, factor)
-            k_dot_tau = jnp.einsum("qgi,ai->qga", ks_cart, xcart)
-            phase_i = jnp.exp(1j * k_dot_tau)
-            K_phase = ks_cart[:, :, None, :] * phase_i[:, :, :, None]
-            ZK = jnp.einsum("iam,qgia->qgim", zeff, K_phase)
-            wZK = ZK * factor[:, :, None, None]
-            return jnp.einsum("qgim,qgjn->qimjn", wZK, ZK.conj())
-
-        _jax_recip_jit = _jax_recip
-        return _jax_recip_jit
-    except (ImportError, Exception):
-        return None
 
 
 def compute_dipdip_dynmats(
@@ -1001,9 +927,8 @@ def compute_dipdip_dynmats(
 ) -> np.ndarray:
     """Compute Ewald dipole-dipole dynamical matrices for many q-points.
 
-    Uses a module-level cached JAX JIT for the reciprocal part when available
-    (GPU/multicore), falling back to NumPy. Real-space blocks are q-independent
-    and precomputed once.
+    This uses the same formula as :func:`compute_dipdip_dynmat`, but caches the
+    q-independent real-space Ewald blocks across all q-points.
     """
     qpoints = np.asarray(qpoints, dtype=float)
     natom = unitcell.natom
@@ -1017,35 +942,11 @@ def compute_dipdip_dynmats(
     g_indices = _dipdip_g_indices(nrecip)
     r_indices, real_blocks = _precompute_dipdip_real_terms(unitcell, eta_val, nreal)
 
-    out = None
-    jax_recip = _get_jax_recip()
-    if jax_recip is not None:
-        try:
-            import jax.numpy as jnp
-
-            out = np.array(
-                jax_recip(
-                    jnp.asarray(qpoints), jnp.asarray(g_indices),
-                    jnp.asarray(rec_lattice), jnp.asarray(unitcell.epsilon_inf),
-                    volume, eta_val, jnp.asarray(unitcell.xcart),
-                    jnp.asarray(unitcell.zeff), sumg0,
-                )
-            )
-        except Exception:
-            out = None
-
-    if out is None:
-        out = _compute_dipdip_reciprocal_parts(
-            qpoints, unitcell, eta_val, g_indices, rec_lattice, volume, sumg0
-        )
-
-    if len(qpoints) > 0:
-        # Per-q einsum: out[iq] += einsum("r,raibj->aibj", phases, real_blocks).
-        # All q share the same real_blocks, so vectorize over q with one GEMM:
-        # phases_all (nq, nR) @ real_blocks (nR, natom*3*natom*3) -> (nq, ...).
-        phases_all = np.exp(-2j * np.pi * (r_indices @ qpoints.T)).T  # (nq, nR)
-        out += (phases_all @ real_blocks.reshape(len(r_indices), -1)).reshape(
-            len(qpoints), natom, 3, natom, 3
-        )
+    out = _compute_dipdip_reciprocal_parts(
+        qpoints, unitcell, eta_val, g_indices, rec_lattice, volume, sumg0
+    )
+    for iq, q in enumerate(qpoints):
+        phases = np.exp(-2j * np.pi * (r_indices @ q))
+        out[iq] += np.einsum("r,raibj->aibj", phases, real_blocks)
 
     return out
