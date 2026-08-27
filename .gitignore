@@ -157,3 +157,7 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# Fortran default output
+fort.7
+fort.*
