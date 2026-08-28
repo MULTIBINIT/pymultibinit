@@ -276,17 +276,21 @@ def evaluate_jax(compiled: CompiledTerms,
 
     stress_voigt = np.zeros(6)
     for v in range(1, 7):
+        s_val = float(sv[v - 1])
         for k in range(compiled.max_strains):
             kmask = jnp.where((sv_idx[:, k] == v) & (sm[:, k] > 0), 1.0, 0.0)
             if not bool(kmask.any()):
                 continue
-            pk = int(compiled.strain_power[:, k].max()) if bool(kmask.any()) else 0
-            s_val = float(sv[v - 1])
             if abs(s_val) > 1e-12:
-                contrib = term_energy * float(pk) * kmask[:, None] / s_val
+                # d/ds of s^p contributes p * E_term / s with the PER-TERM power p;
+                # a column-wide max power silently inflates terms whose own power
+                # is smaller (e.g. mixed eta^1 and eta^2 strain factors).
+                contrib = term_energy * sp[:, k][:, None] * kmask[:, None] / s_val
                 stress_voigt[v - 1] += float(contrib.sum())
-            elif pk == 1:
-                contrib = coeff[:, None] * total_prod * kmask[:, None]
+            else:
+                # At s = 0 only linear (p == 1) factors contribute.
+                pmask = jnp.where(sp[:, k] == 1, 1.0, 0.0)
+                contrib = coeff[:, None] * total_prod * (kmask * pmask)[:, None]
                 stress_voigt[v - 1] += float(contrib.sum())
 
     return energy, forces, stress_voigt
