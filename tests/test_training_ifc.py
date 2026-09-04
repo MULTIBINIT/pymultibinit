@@ -349,7 +349,7 @@ def test_basis_ifc_columns_match_finite_differences():
 def test_build_ifc_fit_data_recovers_known_coefficients(tmp_path, monkeypatch):
     import pymultibinit.training as training_mod
 
-    rprimd = 7.0 * np.eye(3)
+    rprimd = 7.0 * np.eye(3) / BOHR_TO_ANGSTROM
     xred = np.array([[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]])
     reference = TrainingFrame(
         rprimd=rprimd,
@@ -382,7 +382,7 @@ def test_build_ifc_fit_data_recovers_known_coefficients(tmp_path, monkeypatch):
         supercell_matrix=np.eye(3, dtype=int),
         primitive_matrix=np.eye(3),
         unitcell=IfcUnitCell(
-            cell=rprimd / BOHR_TO_ANGSTROM,
+            cell=rprimd,
             symbols=("Ti", "O"),
             scaled_positions=xred,
         ),
@@ -429,7 +429,7 @@ def test_build_ifc_fit_data_recovers_known_coefficients(tmp_path, monkeypatch):
 def test_build_ifc_fit_data_rejects_atom_count_mismatch(tmp_path, monkeypatch):
     import pymultibinit.training as training_mod
 
-    rprimd = 7.0 * np.eye(3)
+    rprimd = 7.0 * np.eye(3) / BOHR_TO_ANGSTROM
     xred = np.array([[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]])
     reference = TrainingFrame(
         rprimd=rprimd,
@@ -452,7 +452,7 @@ def test_build_ifc_fit_data_rejects_atom_count_mismatch(tmp_path, monkeypatch):
         supercell_matrix=2 * np.eye(3, dtype=int),
         primitive_matrix=np.eye(3),
         unitcell=IfcUnitCell(
-            cell=rprimd / BOHR_TO_ANGSTROM,
+            cell=rprimd,
             symbols=("Ti", "O"),
             scaled_positions=xred,
         ),
@@ -464,6 +464,129 @@ def test_build_ifc_fit_data_rejects_atom_count_mismatch(tmp_path, monkeypatch):
             basis, reference, tmp_path / "dummy.ddb",
             PythonFitConfig(ncell=(1, 1, 1)), [target],
         )
+
+
+def test_build_ifc_fit_data_matches_atoms_when_orders_differ(tmp_path, monkeypatch):
+    """Regression: at ncell != (1, 1, 1) the phonopy supercell order
+    (atom-major) differs from the reference supercell order (cell-major).
+    The channel must pair each target atom with its matched reference atom
+    when differencing positions and when aligning the target IFC matrix
+    with the reference-ordered design columns."""
+    import pymultibinit.training as training_mod
+    from pymultibinit.phonon import build_phonopy
+    from ase import Atoms
+
+    # supercell cell 14x7x7 Angstrom; TrainingFrame.rprimd is in Bohr
+    sc_cell_ang = np.array([[14.0, 0.0, 0.0], [0.0, 7.0, 0.0], [0.0, 0.0, 7.0]])
+    rprimd = sc_cell_ang / BOHR_TO_ANGSTROM
+    uc_xred = np.array([[0.0, 0.0, 0.0], [0.3, 0.0, 0.0]])
+    # reference supercell order: a0c0, a1c0, a0c1, a1c1
+    ref_xred = np.array(
+        [[0.0, 0.0, 0.0], [0.15, 0.0, 0.0], [0.5, 0.0, 0.0], [0.65, 0.0, 0.0]]
+    )
+    reference = TrainingFrame(
+        rprimd=rprimd,
+        xred=ref_xred,
+        xcart=ref_xred @ rprimd.T,
+        energy=0.0,
+        forces=np.zeros((4, 3)),
+        stress=np.zeros(6),
+    )
+    monkeypatch.setattr(
+        training_mod,
+        "_fixed_ifc_matrices",
+        lambda _ddb, _ncell: (np.zeros((12, 12)), [None] * 6),
+    )
+
+    # sublattice-uniform displacements (Angstrom) folded into the unit cell
+    u_a = np.array([0.012, 0.004, 0.002])
+    u_b = np.array([0.005, 0.006, 0.003])
+    uc_xred_disp = uc_xred + np.stack([u_a, u_b]) / 7.0
+    # phonopy supercell order: a0c0, a0c1, a1c0, a1c1; fractional x is
+    # halved in the doubled cell
+    atoms = Atoms(
+        symbols=["Ti", "O"],
+        cell=np.eye(3) * 7.0,
+        scaled_positions=uc_xred_disp,
+        pbc=True,
+    )
+    _, sc = build_phonopy(
+        atoms, supercell_matrix=np.diag([2, 1, 1]).astype(int),
+        primitive_matrix=np.eye(3),
+    )
+    sc_xred = np.asarray(sc.get_scaled_positions(wrap=False))
+    half = uc_xred_disp * np.array([0.5, 1.0, 1.0])
+    expected = np.array(
+        [half[0], half[0] + [0.5, 0, 0], half[1], half[1] + [0.5, 0, 0]]
+    )
+    np.testing.assert_allclose(sc_xred, expected, atol=1e-10)
+    # perm[i] = reference atom matched to target atom i
+    perm = np.array([0, 2, 1, 3])
+
+    # quadratic pair terms have u-independent Hessians, so add a cubic
+    # term: its IFC column is linear in the pair displacement and any
+    # atom-ordering mistake in the internal displacement field shows up
+    # directly in the design
+    basis = _pair_basis() + [
+        XmlBasisFunction(
+            number=3,
+            value=0.0,
+            text="pair-x3",
+            terms=(
+                {
+                    "weight": 1.1,
+                    "displacements": (
+                        {
+                            "atom_a": 0,
+                            "atom_b": 1,
+                            "direction": "x",
+                            "power": 3,
+                            "cell_a": (0, 0, 0),
+                            "cell_b": (0, 0, 0),
+                        },
+                    ),
+                    "strains": (),
+                },
+            ),
+        ),
+    ]
+    u_ref = np.stack([u_a, u_b, u_a, u_b]) / BOHR_TO_ANGSTROM
+    columns_ev = _basis_ifc_columns(
+        basis, u_ref, np.zeros(6), (2, 1, 1), 2,
+        unit_factor=HA_BOHR2_TO_EV_ANGSTROM2,
+    )
+    c_true = np.array([0.02, -0.01, 0.03])
+    k_ref = (c_true[:, None, None] * columns_ev).sum(axis=0)
+    flat_perm = (3 * perm[:, None] + np.arange(3)[None, :]).reshape(-1)
+    target_ifc = k_ref[np.ix_(flat_perm, flat_perm)].reshape(-1)
+
+    target = IfcTarget(
+        id="shuffled",
+        weight=1.0,
+        ifc=target_ifc,
+        supercell_matrix=np.diag([2, 1, 1]).astype(int),
+        primitive_matrix=np.eye(3),
+        unitcell=IfcUnitCell(
+            cell=np.eye(3) * 7.0,
+            symbols=("Ti", "O"),
+            scaled_positions=uc_xred_disp,
+        ),
+        content_hash="synthetic-hash",
+        metadata={},
+    )
+
+    ifc_data = build_ifc_fit_data(
+        basis, reference, tmp_path / "dummy.ddb",
+        PythonFitConfig(ncell=(2, 1, 1), ifc_factor=1.0), [target],
+    )
+
+    assert ifc_data.ids == ("shuffled",)
+    # exact recovery of the contraction is only possible when the internal
+    # displacement field and matrix alignment both respect the atom matching
+    assert ifc_data.goal_ifc(c_true) == pytest.approx(0.0, abs=1e-12)
+    rmse, max_abs = ifc_data.rmse(c_true)
+    assert rmse == pytest.approx(0.0, abs=1e-12)
+    assert max_abs == pytest.approx(0.0, abs=1e-12)
 
 
 # ----------------------------------------------------------------------

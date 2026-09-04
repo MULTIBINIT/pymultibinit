@@ -1171,9 +1171,9 @@ def _basis_ifc_columns(basis, u, strain_voigt, ncell, natom_uc,
 
     ``basis`` is the training basis (``XmlBasisFunction`` sequence, same
     compilation conventions as ``evaluate_basis_features``); ``u`` is the
-    supercell displacement field in the target atom order, ``strain_voigt``
-    the matching Voigt strain. Returns ``(len(indices), 3N, 3N)`` columns
-    multiplied by ``unit_factor`` (pass
+    supercell displacement field in the REFERENCE supercell atom order,
+    ``strain_voigt`` the matching Voigt strain. Returns
+    ``(len(indices), 3N, 3N)`` columns multiplied by ``unit_factor`` (pass
     ``HA_BOHR2_TO_EV_ANGSTROM2`` for canonical eV/Angstrom^2). Sign and
     ordered-pair conventions are the shared derivation-D2 scatter used by
     ``second_derivatives._fitted_term_blocks``.
@@ -1311,19 +1311,32 @@ def build_ifc_fit_data(basis, reference, ddb_path, config: PythonFitConfig,
         strain_tensor = _engineering_strain(rprimd_t, inv_ref_rprimd)
         strain_voigt = _strain_tensor_to_voigt(strain_tensor)
         ref_xcart_in_t = ref_xred @ rprimd_t.T
-        u_ref_order = xcart_t - ref_xcart_in_t
-        u = u_ref_order[perm]      # target atom order
+        # perm[i] is the reference atom matching target atom i. The design
+        # columns of _basis_ifc_columns are indexed in the REFERENCE
+        # supercell order (indices come from the basis anchors), so the
+        # displacement field must pair each reference atom with its target
+        # match: u[perm[i]] = xcart_t[i] - ref_xcart_in_t[perm[i]]. The
+        # target IFC matrix is permuted into reference order the same way.
+        # (Positional differencing and permuting afterwards scrambles atoms
+        # whenever the two supercell orderings differ, e.g. phonopy's
+        # atom-major order vs the cell-major reference at ncell != (1,1,1).)
+        u = np.empty_like(xcart_t)
+        u[perm] = xcart_t - ref_xcart_in_t[perm]
 
         k_fixed = phi.copy()
         for alpha in range(6):
             phi_alpha = phi_strains[alpha] if alpha < len(phi_strains) else None
             if phi_alpha is not None:
                 k_fixed = k_fixed + (strain_voigt[alpha] / 3.0) * phi_alpha
-        flat_perm = (3 * perm[:, None] + np.arange(3)[None, :]).reshape(-1)
-        k_fixed_t = k_fixed[np.ix_(flat_perm, flat_perm)] * HA_BOHR2_TO_EV_ANGSTROM2
-
         n3 = 3 * natom_t
-        residual = (np.asarray(target.ifc, dtype=float) - k_fixed_t).reshape(-1)
+        # perm maps target atoms onto reference atoms; expressing the
+        # target-order IFC matrix in reference order needs the inverse
+        sigma = np.argsort(perm)
+        flat_sigma = (3 * sigma[:, None] + np.arange(3)[None, :]).reshape(-1)
+        target_ifc = np.asarray(target.ifc, dtype=float).reshape(n3, n3)
+        target_ref = target_ifc[np.ix_(flat_sigma, flat_sigma)]
+        k_fixed_ref = k_fixed * HA_BOHR2_TO_EV_ANGSTROM2
+        residual = (target_ref - k_fixed_ref).reshape(-1)
         geo = float(target.weight) / (n3 * n3 * n_active)
 
         cols = _basis_ifc_columns(basis_list, u, strain_voigt, config.ncell,
@@ -1339,8 +1352,8 @@ def build_ifc_fit_data(basis, reference, ddb_path, config: PythonFitConfig,
         weights.append(float(target.weight))
         n3s.append(n3)
         geo_factors.append(geo)
-        references.append(np.asarray(target.ifc, dtype=float))
-        fixed.append(k_fixed_t)
+        references.append(target_ref)
+        fixed.append(k_fixed_ref)
         states.append((u.copy(), strain_voigt.copy()))
 
     def column_fn(target_index, coeff_indices):
