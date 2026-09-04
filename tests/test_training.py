@@ -1022,12 +1022,12 @@ def test_fit_screened_greedy_uses_screening_weights_and_candidate_pool(monkeypat
             stress=np.zeros((ntime, 6, ncoeff)),
         )
 
-    def fake_rhs_diagonal_target(features, chunk_dataset, config, weights):
+    def fake_rhs_diagonal_target(features, chunk_dataset, config, weights, ifc_data=None):
         seen_screening_weights.append(None if weights is None else np.asarray(weights).copy())
         ncoeff = features.energy.shape[1]
         return np.arange(1, ncoeff + 1, dtype=float), np.ones(ncoeff), 1.0
 
-    def fake_select_greedy_coefficients(features, full_dataset, config, weights=None):
+    def fake_select_greedy_coefficients(features, full_dataset, config, weights=None, ifc_data=None):
         assert np.asarray(weights).tolist() == [1.0, 2.0, 3.0, 4.0]
         return training_mod.GreedySelectionResult(
             selected=(0,),
@@ -1098,11 +1098,11 @@ def test_screened_greedy_forces_pure_strain_candidates_into_pool(monkeypatch):
             stress=np.zeros((ntime, 6, ncoeff)),
         )
 
-    def fake_rhs_diagonal_target(features, chunk_dataset, config, weights):
+    def fake_rhs_diagonal_target(features, chunk_dataset, config, weights, ifc_data=None):
         ncoeff = features.energy.shape[1]
         return np.arange(ncoeff, 0, -1, dtype=float), np.ones(ncoeff), 1.0
 
-    def fake_select_greedy_coefficients(features, full_dataset, config, weights=None, pure_strain_indices=None):
+    def fake_select_greedy_coefficients(features, full_dataset, config, weights=None, pure_strain_indices=None, ifc_data=None):
         seen["pool_pure_indices"] = pure_strain_indices
         return training_mod.GreedySelectionResult(
             selected=(0, 1),
