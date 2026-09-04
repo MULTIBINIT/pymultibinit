@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from pymultibinit.potential import BOHR_TO_ANGSTROM, HARTREE_TO_EV
 from pymultibinit.pyeffpot.potential import EffectivePotential
 from pymultibinit.pyeffpot.second_derivatives import (
     HessianBlocks,
@@ -171,3 +172,43 @@ def test_elastic_fixed_u_at_reference_matches_energy_fd(potential):
               - 2 * potential.evaluate_energy_only(xcart, rprimd0)
               + potential.evaluate_energy_only(xc_m, rp_m)) / h ** 2
         assert abs(C0[nu, nu] - fd) < 1e-5 * scale, (nu, C0[nu, nu], fd)
+
+
+
+def test_multibinit_potential_wrapper_units_roundtrip():
+    """Story 3: Angstrom/eV wrapper matches direct Bohr/Hartree blocks."""
+    pytest.importorskip("ase")
+    from pymultibinit import MultibinitCalculator
+
+    calc = MultibinitCalculator.from_pyeffpot(
+        ddb_file=os.environ.get("PMB_TEST_DDB", str(DDB)),
+        xml_file=os.environ.get("PMB_TEST_XML", str(XML)),
+        ncell=(2, 2, 2), match_tolerance=0.35)
+    pot = calc.potential
+    ref_ang = potential_ref(pot)
+    rng = np.random.default_rng(3)
+    pos = ref_ang[0] + rng.normal(scale=0.03, size=ref_ang[0].shape)
+    lat = ref_ang[1]
+
+    bl_ev = pot.analytic_blocks(pos, lat)
+    eff = pot._pyeffpot_potential
+    bl_ha = analytic_blocks(eff, u_of(pot, pos, lat), np.zeros((3, 3)))
+    ff = HARTREE_TO_EV / BOHR_TO_ANGSTROM
+    assert np.abs(bl_ev.forces - bl_ha.forces * ff).max() < 1e-12 * np.abs(bl_ha.forces).max()
+    assert np.abs(bl_ev.ifc - bl_ha.ifc * ff / BOHR_TO_ANGSTROM).max() < 1e-12 * np.abs(bl_ha.ifc).max()
+    assert np.abs(bl_ev.coupling - bl_ha.coupling * ff).max() < 1e-12 * np.abs(bl_ha.coupling).max()
+    assert np.abs(bl_ev.elastic_fixed_u - bl_ha.elastic_fixed_u * HARTREE_TO_EV).max() < 1e-12
+    _, F_ev, _ = pot.evaluate(pos, lat)
+    assert np.abs(bl_ev.forces - F_ev).max() < 1e-6
+
+
+def potential_ref(pot):
+    eff = pot._pyeffpot_potential
+    return (eff.supercell.crystal_sc.xcart * BOHR_TO_ANGSTROM,
+            eff._reference_lattice.T * BOHR_TO_ANGSTROM)
+
+
+def u_of(pot, pos_ang, lat_ang):
+    eff = pot._pyeffpot_potential
+    return eff._compute_displacements(
+        pos_ang / BOHR_TO_ANGSTROM, (lat_ang / BOHR_TO_ANGSTROM).T)

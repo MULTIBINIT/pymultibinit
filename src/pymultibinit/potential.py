@@ -701,6 +701,59 @@ class MultibinitPotential:
             )
         return result
 
+    def analytic_blocks(self, positions: np.ndarray, lattice: np.ndarray,
+                        skip_atom_matching: bool = False):
+        """Exact analytic second-derivative blocks at an arbitrary structure.
+
+        Maps the input structure through the same atom-matching machinery as
+        :meth:`evaluate` (identical ``match_tolerance`` semantics) and returns
+        exact second partials of the effective-potential energy, converted to
+        ASE units (eV, Angstrom):
+
+        - ``ifc``            (3N, 3N) eV/Angstrom^2   d2E/du du
+        - ``elastic_fixed_u``(6, 6)   eV              d2E/deta deta at fixed u
+        - ``coupling``       (6, 3N)  eV/Angstrom     d2E/deta du
+        - ``forces``         (N, 3)   eV/Angstrom     F = -dE/du (input order)
+        - ``strain_voigt``   (6,)     dimensionless   engineering Voigt strain
+
+        Atom rows/columns of ``ifc``/``coupling`` and ``forces`` rows are in
+        the INPUT atom order (inverse mapping applied when matching reordered
+        atoms), flat index ``3*atom + direction``. Use
+        :func:`pymultibinit.pyeffpot.second_derivatives.elastic_affine` on
+        the Bohr/Hartree blocks for the clamped-ion elastic constant; the
+        returned ``elastic_fixed_u`` here is the fixed-u partial only.
+
+        Requires the pure-Python (``pyeffpot``) backend.
+        """
+        from .pyeffpot.second_derivatives import analytic_blocks as _blocks
+
+        positions_for_eval, need_force_remapping = self._prepare_for_evaluation(
+            positions, lattice, skip_atom_matching)
+        if self.backend != 'pyeffpot' or self._pyeffpot_potential is None:
+            raise NotImplementedError(
+                "analytic_blocks is only supported by the pyeffpot backend.")
+
+        pos_bohr = positions_for_eval * ANGSTROM_TO_BOHR
+        lat_bohr = lattice * ANGSTROM_TO_BOHR
+        eff = self._pyeffpot_potential
+        u = eff._compute_displacements(pos_bohr, lat_bohr.T)
+        eta = eff._compute_strain(lat_bohr.T)
+        bl = _blocks(eff, u, eta)
+
+        if need_force_remapping and self._inverse_mapping is not None:
+            inv = np.asarray(self._inverse_mapping, dtype=int)
+            flat = (3 * inv[:, None] + np.arange(3)[None, :]).reshape(-1)  # eval -> input
+            bl.forces = bl.forces[inv]
+            bl.ifc = bl.ifc[np.ix_(flat, flat)]
+            bl.coupling = bl.coupling[:, flat]
+
+        force_factor = HARTREE_TO_EV / BOHR_TO_ANGSTROM
+        bl.forces = bl.forces * force_factor
+        bl.ifc = bl.ifc * (force_factor / BOHR_TO_ANGSTROM)
+        bl.coupling = bl.coupling * force_factor
+        bl.elastic_fixed_u = bl.elastic_fixed_u * HARTREE_TO_EV
+        return bl
+
     def get_supercell_structure(self) -> Optional[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
         """
         Get the MULTIBINIT internal supercell structure (reference structure).

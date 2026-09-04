@@ -580,3 +580,24 @@ class MultibinitCalculator(Calculator):
 
         # ASE stress order is [xx, yy, zz, yz, xz, xy] in eV/Angstrom^3.
         self.results['stress'] = stress  # eV/Angstrom^3
+
+    def get_analytic_blocks(self, atoms=None):
+        """Exact second-derivative blocks for an ASE Atoms object.
+
+        Thin ASE surface over
+        :meth:`MultibinitPotential.analytic_blocks`; returns a
+        :class:`~pymultibinit.pyeffpot.second_derivatives.HessianBlocks`
+        in eV/Angstrom units with atom rows in the Atoms (input) order:
+        ``ifc`` (3N,3N) eV/A^2, ``elastic_fixed_u`` (6,6) eV,
+        ``coupling`` (6,3N) eV/A, ``forces`` (N,3) eV/A,
+        ``strain_voigt`` (6,). Requires the pyeffpot backend.
+        """
+        if self._closed:
+            raise RuntimeError("MultibinitCalculator is closed")
+        if atoms is None:
+            atoms = self.atoms
+        if atoms is None:
+            raise RuntimeError("MultibinitCalculator requires ASE atoms")
+        positions = atoms.get_positions()
+        cell = atoms.get_cell().array
+        return self.potential.analytic_blocks(positions, cell)
