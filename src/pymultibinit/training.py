@@ -54,6 +54,7 @@ class PythonFitConfig:
     include_pure_strain: bool = True
     max_strain_power: int = 4
     min_pure_strain_ratio: float = 0.05
+    ifc_factor: float = 1.0
 
     def __post_init__(self) -> None:
         ncell = _tuple3_int(self.ncell, "ncell")
@@ -103,6 +104,12 @@ class PythonFitConfig:
             raise ValueError("min_pure_strain_ratio must be in [0, 1]")
         if self.selection in {"greedy", "screened_greedy"} and not self.include_pure_strain and min_pure_strain_ratio > 0.0:
             raise ValueError("include_pure_strain=False is inconsistent with a positive min_pure_strain_ratio")
+        if not np.isfinite(self.ifc_factor):
+            raise ValueError("ifc_factor must be finite")
+        if self.ifc_factor < 0.0:
+            raise ValueError("ifc_factor must be non-negative")
+        object.__setattr__(self, "min_pure_strain_ratio", min_pure_strain_ratio)
+        object.__setattr__(self, "ifc_factor", float(self.ifc_factor))
 
         object.__setattr__(self, "ncell", ncell)
         object.__setattr__(self, "fit_on", fit_on)
@@ -208,6 +215,7 @@ class GoalFunctionComponents:
     force: float
     stress: float
     energy: float
+    ifc: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -243,6 +251,7 @@ class PythonFitResult:
     hist: str
     basis_xml: str
     selection_steps: tuple[Mapping[str, object], ...] = ()
+    ifc_report: Optional[dict] = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -478,6 +487,7 @@ def solve_weighted_least_squares(
     config: Optional[PythonFitConfig] = None,
     weights=None,
     regularization: Optional[float] = None,
+    ifc_data: Optional[IfcFitData] = None,
 ) -> LinearFitResult:
     """Solve MULTIBINIT-style weighted normal equations with optional ridge."""
     cfg = config or PythonFitConfig(ncell=(1, 1, 1))
@@ -488,7 +498,9 @@ def solve_weighted_least_squares(
     if ridge < 0.0:
         raise ValueError("regularization must be non-negative")
 
-    normal, rhs = _normal_equations(features, dataset, cfg, weights_array)
+    normal, rhs = _normal_equations(features, dataset, cfg, weights_array,
+                                    ifc_data=ifc_data)
+    rank = int(np.linalg.matrix_rank(normal))
     if ridge:
         normal = normal + ridge * np.eye(normal.shape[0])
     try:
@@ -501,9 +513,11 @@ def solve_weighted_least_squares(
         coefficients = np.zeros(normal.shape[0], dtype=float)
         info = 2
 
-    goal = compute_goal_function(coefficients, features, dataset, weights_array)
-    residual_norm = _weighted_residual_norm(coefficients, features, dataset, weights_array, cfg)
-    rank = int(np.linalg.matrix_rank(normal))
+    goal = compute_goal_function(coefficients, features, dataset, weights_array,
+                                 ifc_data=ifc_data)
+    residual_norm = _weighted_residual_norm(coefficients, features, dataset,
+                                            weights_array, cfg,
+                                            ifc_data=ifc_data)
     condition = float(np.linalg.cond(normal)) if normal.size else 0.0
     return LinearFitResult(
         coefficients=coefficients,
@@ -518,7 +532,7 @@ def solve_weighted_least_squares(
     )
 
 
-def compute_goal_function(coefficients, features: FitFeatureMatrices, dataset, weights=None) -> GoalFunctionComponents:
+def compute_goal_function(coefficients, features: FitFeatureMatrices, dataset, weights=None, ifc_data: Optional[IfcFitData] = None) -> GoalFunctionComponents:
     """Compute MULTIBINIT ``computeGF`` components for predictions and residuals."""
     coeffs = np.asarray(coefficients, dtype=float)
     ntime = features.energy.shape[0]
@@ -542,7 +556,8 @@ def compute_goal_function(coefficients, features: FitFeatureMatrices, dataset, w
     force = force_raw / (3 * natom * ntime)
     stress = stress_raw / (6 * ntime)
     energy = energy_raw / ntime
-    return GoalFunctionComponents(force_stress=force + stress, force=force, stress=stress, energy=energy)
+    ifc = ifc_data.goal_ifc(coeffs) if ifc_data is not None and not ifc_data.empty else 0.0
+    return GoalFunctionComponents(force_stress=force + stress, force=force, stress=stress, energy=energy, ifc=float(ifc))
 
 
 def load_xml_basis(filename) -> list[XmlBasisFunction]:
@@ -954,6 +969,403 @@ def evaluate_basis_features(basis, dataset, ncell, backend: str = "auto", memmap
     )
     return FitFeatureMatrices(energy=energy, forces=forces, stress=stress)
 
+@dataclass(frozen=True)
+class IfcFitData:
+    """Pre-contracted IFC-channel accumulators (Story 3; derivation D4).
+
+    Fourth linear channel beside forces/stress/energy. All quantities carry
+    the geometric per-target weights ``g_k = w_k / ((3 N_k)^2 n_active)``
+    (matrix-entry mean over the active targets) but NOT the global
+    ``ifc_factor``; every consumption site multiplies by
+    ``config.ifc_factor`` exactly like the other channel factors:
+
+        normal       (ncoeff, ncoeff)  ``sum_k g_k <X_kj, X_kl>``
+        rhs          (ncoeff,)         ``sum_k g_k <X_kj, r_k>``
+        diagonal     (ncoeff,)         ``sum_k g_k ||X_kj||^2``
+        target_norm  float             ``sum_k g_k ||r_k||^2``
+
+    with ``r_k = vec(K_ref_k - K_fixed_k)`` in canonical eV/Angstrom^2
+    atom-major flat order and ``X_kj`` the unit-coefficient IFC columns
+    (same units, same order). The channel objective for coefficients ``c``
+    is ``target_norm - 2 c.rhs + c.normal.c``.
+
+    Backing store: per-target design matrices ``designs`` (ncoeff,
+    (3N_k)^2) in eV/Angstrom^2, from which every normal contraction is
+    computed exactly (``submatrix``/``normal_matvec``/``normal_column``).
+    A dense ``normal`` cache is kept when the builder can afford it
+    (small bases); large bases run design-backed with no O(ncoeff^2)
+    storage.
+    """
+
+    rhs: np.ndarray
+    diagonal: np.ndarray
+    target_norm: float
+    ids: tuple
+    weights: tuple
+    n3s: tuple
+    geo_factors: tuple
+    references: tuple            # K_ref_k, (3N_k, 3N_k) eV/Angstrom^2
+    fixed: tuple                 # K_fixed_k, same order/units
+    designs: tuple = ()          # per-target (ncoeff, (3N_k)^2) columns
+    normal: object = None        # dense (ncoeff, ncoeff) cache or None
+    column_fn: object = None     # callable(target_index, coeff_indices) -> columns
+
+    def __post_init__(self) -> None:
+        rhs = np.asarray(self.rhs, dtype=float)
+        diagonal = np.asarray(self.diagonal, dtype=float)
+        ncoeff = rhs.shape[0] if rhs.ndim == 1 else -1
+        if ncoeff < 0 or diagonal.shape != (ncoeff,):
+            raise ValueError("IFC rhs/diagonal must have shape (ncoeff,)")
+        if self.normal is not None:
+            normal = np.asarray(self.normal, dtype=float)
+            if normal.ndim != 2 or normal.shape[0] != normal.shape[1]:
+                raise ValueError("IFC normal must be a square (ncoeff, ncoeff) array")
+            if normal.shape[0] != ncoeff:
+                raise ValueError("IFC normal must match rhs length")
+            if not np.isfinite(normal).all():
+                raise ValueError("IFC accumulators must be finite")
+            object.__setattr__(self, "normal", normal)
+        designs = tuple(self.designs)
+        for k, design in enumerate(designs):
+            arr = np.asarray(design, dtype=float)
+            if arr.ndim != 2 or arr.shape[0] != ncoeff:
+                raise ValueError(
+                    f"IFC design {k} must have shape (ncoeff, (3N_k)^2); got {arr.shape}")
+            if arr.shape[1] != self.n3s[k] ** 2:
+                raise ValueError(
+                    f"IFC design {k} second dimension must be (3N_k)^2 = "
+                    f"{self.n3s[k] ** 2}; got {arr.shape[1]}")
+            designs = designs[:k] + (arr,) + designs[k + 1:]
+        if self.normal is None and not designs and self.column_fn is None:
+            raise ValueError(
+                "IfcFitData requires designs, a dense normal, or a column_fn")
+        object.__setattr__(self, "designs", designs)
+        if not (np.isfinite(rhs).all() and np.isfinite(diagonal).all()
+                and np.isfinite(float(self.target_norm))):
+            raise ValueError("IFC accumulators must be finite")
+        object.__setattr__(self, "rhs", rhs)
+        object.__setattr__(self, "diagonal", diagonal)
+        object.__setattr__(self, "target_norm", float(self.target_norm))
+
+    @property
+    def n_active(self) -> int:
+        return len(self.ids)
+
+    @property
+    def empty(self) -> bool:
+        return self.n_active == 0
+
+    def selected(self, selected) -> "IfcFitData":
+        """Column slicing semantics mirroring ``FitFeatureMatrices``."""
+        indices = list(selected)
+        designs = (tuple(np.asarray(d)[indices] for d in self.designs)
+                   if self.designs else ())
+        return IfcFitData(
+            rhs=self.rhs[indices],
+            diagonal=self.diagonal[indices],
+            target_norm=self.target_norm,
+            ids=self.ids, weights=self.weights, n3s=self.n3s,
+            geo_factors=self.geo_factors,
+            references=self.references, fixed=self.fixed,
+            designs=designs,
+            normal=(self.normal[np.ix_(indices, indices)]
+                    if self.normal is not None else None),
+            column_fn=self.column_fn,
+        )
+
+    def submatrix(self, indices) -> np.ndarray:
+        """g-weighted normal block ``sum_k g_k X[idx] X[idx].T``."""
+        idx = np.asarray([int(i) for i in indices], dtype=int)
+        if self.designs:
+            out = np.zeros((len(idx), len(idx)), dtype=float)
+            for k, design in enumerate(self.designs):
+                rows = design[idx]
+                out += float(self.geo_factors[k]) * (rows @ rows.T)
+            return out
+        if self.normal is not None:
+            return self.normal[np.ix_(idx, idx)]
+        if self.column_fn is not None:
+            out = np.zeros((len(idx), len(idx)), dtype=float)
+            for k in range(self.n_active):
+                cols = np.asarray(self.column_fn(k, tuple(idx)), dtype=float)
+                flat = cols.reshape(len(idx), -1)
+                out += float(self.geo_factors[k]) * (flat @ flat.T)
+            return out
+        raise ValueError("IfcFitData has no normal provider (designs/normal/column_fn)")
+
+    def normal_matvec(self, v) -> np.ndarray:
+        """``(sum_k g_k X_k X_k^T) @ v`` without materializing the normal."""
+        v = np.asarray(v, dtype=float)
+        if self.designs:
+            out = np.zeros(v.shape[0], dtype=float)
+            for k, design in enumerate(self.designs):
+                out += float(self.geo_factors[k]) * (design @ (design.T @ v))
+            return out
+        return self.submatrix(range(v.shape[0])) @ v
+
+    def normal_column(self, index) -> np.ndarray:
+        """Column ``index`` of the g-weighted normal (ncoeff,)."""
+        index = int(index)
+        if self.designs:
+            out = np.zeros(self.rhs.shape[0], dtype=float)
+            for k, design in enumerate(self.designs):
+                out += float(self.geo_factors[k]) * (design @ design[index])
+            return out
+        unit = np.zeros(self.rhs.shape[0], dtype=float)
+        unit[index] = 1.0
+        return self.normal_matvec(unit)
+
+    def goal_ifc(self, coefficients) -> float:
+        """Weighted Frobenius objective without the global ifc_factor."""
+        coeffs = np.asarray(coefficients, dtype=float)
+        if self.normal is not None:
+            quad = coeffs @ self.normal @ coeffs
+        else:
+            quad = coeffs @ self.normal_matvec(coeffs)
+        return float(self.target_norm - 2.0 * coeffs @ self.rhs + quad)
+
+    def correction(self, target_index: int, coefficients, selected=()) -> np.ndarray:
+        """Model IFC correction ``sum_j c_j X_kj`` for one target."""
+        if self.column_fn is None:
+            raise ValueError("IfcFitData has no column provider")
+        selected = tuple(selected)
+        coeffs = np.asarray(coefficients, dtype=float)
+        if selected and len(selected) != coeffs.shape[0]:
+            raise ValueError("selected coefficient count must match coefficients")
+        if coeffs.size == 0:
+            return np.zeros((self.n3s[target_index], self.n3s[target_index]))
+        if not selected:
+            # empty selection with a non-empty vector means the full basis
+            selected = tuple(range(coeffs.shape[0]))
+        columns = np.asarray(self.column_fn(target_index, selected),
+                             dtype=float)
+        return np.einsum("jab,j->ab", columns, coeffs)
+
+    def rmse_per_target(self, coefficients, selected=()) -> list:
+        """[(rmse, max_abs)] per active target, eV/Angstrom^2."""
+        out = []
+        for k in range(self.n_active):
+            residual = (self.references[k] - self.fixed[k]
+                        - self.correction(k, coefficients, selected))
+            out.append((float(np.sqrt(np.mean(residual ** 2))),
+                        float(np.abs(residual).max())))
+        return out
+
+    def rmse(self, coefficients, selected=()) -> tuple:
+        """(rmse, max_abs) over all active targets, eV/Angstrom^2."""
+        residual_sq = 0.0
+        count = 0
+        max_abs = 0.0
+        for k in range(self.n_active):
+            residual = (self.references[k] - self.fixed[k]
+                        - self.correction(k, coefficients, selected))
+            residual_sq += float(np.sum(residual ** 2))
+            count += residual.size
+            max_abs = max(max_abs, float(np.abs(residual).max()))
+        return (float(np.sqrt(residual_sq / max(count, 1))), max_abs)
+
+
+def _basis_ifc_columns(basis, u, strain_voigt, ncell, natom_uc,
+                       indices=None, unit_factor: float = 1.0) -> np.ndarray:
+    """Per-coefficient unit-value IFC columns ``X_j = d2E_j/du2`` (Ha/Bohr^2).
+
+    ``basis`` is the training basis (``XmlBasisFunction`` sequence, same
+    compilation conventions as ``evaluate_basis_features``); ``u`` is the
+    supercell displacement field in the target atom order, ``strain_voigt``
+    the matching Voigt strain. Returns ``(len(indices), 3N, 3N)`` columns
+    multiplied by ``unit_factor`` (pass
+    ``HA_BOHR2_TO_EV_ANGSTROM2`` for canonical eV/Angstrom^2). Sign and
+    ordered-pair conventions are the shared derivation-D2 scatter used by
+    ``second_derivatives._fitted_term_blocks``.
+    """
+    from .pyeffpot.second_derivatives import _term_ifc_scatter
+
+    basis_list = list(basis)
+    ncell_tuple = _tuple3_int(ncell, "ncell")
+    selected = list(range(len(basis_list))) if indices is None else list(indices)
+    u = np.asarray(u, dtype=float)
+    natom_sc = u.shape[0]
+    columns = np.zeros((len(selected), 3 * natom_sc, 3 * natom_sc), dtype=float)
+    origins = _origin_cells(ncell_tuple)
+
+    for out_index, coeff_index in enumerate(selected):
+        for term in basis_list[coeff_index].terms:
+            # dict terms are the canonical convention (compile_term in
+            # features.py); _basis_term normalizes attribute-style payloads.
+            term_map = term if isinstance(term, Mapping) else _basis_term(term)
+            compiled = [
+                _compile_displacement_factor(disp, origins, ncell_tuple, natom_uc)
+                for disp in term_map["displacements"] if int(disp["power"]) != 0
+            ]
+            if not compiled:
+                continue
+            s_val = _strain_product(term_map["strains"], strain_voigt)
+            d_vals = [u[c["idx_a"], c["direction"]] - u[c["idx_b"], c["direction"]]
+                      for c in compiled]
+            idx_a = [c["idx_a"] for c in compiled]
+            idx_b = [c["idx_b"] for c in compiled]
+            dirs = [c["direction"] for c in compiled]
+            pows = [c["power"] for c in compiled]
+            _term_ifc_scatter(columns[out_index], d_vals, idx_a, idx_b, dirs,
+                              pows, s_val, float(term_map["weight"]) * unit_factor)
+    return columns
+
+
+def _fixed_ifc_matrices(ddb_path: Path, ncell: tuple[int, int, int]):
+    """Fixed-channel IFC matrices (Phi, [Phi_alpha]) of the DDB reference.
+
+    Hartree/Bohr^2, supercell atom order of ``build_supercell`` (the same
+    order ``_reference_frame_from_ddb`` reports). ``Phi`` is ``None`` when
+    the DDB carries no harmonic IFCs; ``Phi_alpha`` entries are ``None``
+    when the phonon-strain channel alpha is absent.
+    """
+    from pymultibinit.pyeffpot.potential import EffectivePotential
+    from pymultibinit.pyeffpot.supercell_builder import build_supercell
+    from pymultibinit.pyeffpot.ddb_parser_complete import read_ddb
+
+    supercell = build_supercell(read_ddb(str(ddb_path)), ncell)
+    potential = EffectivePotential(supercell)
+    phi = getattr(potential, "_phi_matrix", None)
+    phi_strains = getattr(potential, "_phonon_strain_matrices", None) or [None] * 6
+    return phi, list(phi_strains)
+
+
+def build_ifc_fit_data(basis, reference, ddb_path, config: PythonFitConfig,
+                       ifc_targets) -> IfcFitData:
+    """Map canonical IFC targets onto the fit reference and contract them.
+
+    For each target: rebuilds the phonopy supercell (the exact atom order the
+    canonical artifact uses), matches its atoms onto the reference supercell
+    by fractional-coordinate assignment, evaluates the fixed channels
+    ``K_fixed = Phi + sum_alpha (eta_alpha/3) Phi_alpha`` at the target's
+    strain, and streams the per-coefficient columns into the accumulators
+    (``normal``/``rhs``/``diagonal``/``target_norm``) with the geometric
+    weights ``g_k``. Everything is converted to eV/Angstrom^2 at this
+    boundary.
+    """
+    from ase import Atoms
+    from pymultibinit.phonon import build_phonopy
+    from pymultibinit.potential import ANGSTROM_TO_BOHR
+    from pymultibinit.pyeffpot.ifc_targets import HA_BOHR2_TO_EV_ANGSTROM2
+
+    basis_list = list(basis)
+    ncoeff = len(basis_list)
+    if ncoeff == 0:
+        raise ValueError("Cannot build IFC fit data with an empty basis")
+    targets = list(ifc_targets)
+    if not targets:
+        raise ValueError("Cannot build IFC fit data with no targets")
+    n_active = len(targets)
+
+    ref_rprimd, ref_xcart, ref_xred = _reference_lattice_positions(reference)
+    inv_ref_rprimd = np.linalg.inv(ref_rprimd)
+    natom_ref = ref_xcart.shape[0]
+    ncells = int(np.prod(_tuple3_int(config.ncell, "ncell")))
+    if natom_ref % ncells:
+        raise ValueError("Reference supercell atom count is not divisible by ncell")
+    natom_uc = natom_ref // ncells
+
+    phi, phi_strains = _fixed_ifc_matrices(Path(ddb_path), config.ncell)
+    if phi is None:
+        phi = np.zeros((3 * natom_ref, 3 * natom_ref), dtype=float)
+
+    rhs = np.zeros(ncoeff, dtype=float)
+    diagonal = np.zeros(ncoeff, dtype=float)
+    target_norm = 0.0
+    ids, weights, n3s, geo_factors, references, fixed = [], [], [], [], [], []
+    states = []
+    designs = []
+
+    for target in targets:
+        unitcell = target.unitcell
+        atoms = Atoms(symbols=list(unitcell.symbols),
+                      cell=np.asarray(unitcell.cell, dtype=float),
+                      scaled_positions=np.asarray(unitcell.scaled_positions,
+                                                  dtype=float),
+                      pbc=True)
+        _, supercell_atoms = build_phonopy(
+            atoms,
+            supercell_matrix=np.asarray(target.supercell_matrix),
+            primitive_matrix=np.asarray(target.primitive_matrix, dtype=float),
+        )
+        natom_t = len(supercell_atoms)
+        if natom_t != natom_ref:
+            raise ValueError(
+                f"IFC target '{target.id}': supercell has {natom_t} atoms but "
+                f"the fit reference supercell has {natom_ref}; the target must "
+                "match the fit supercell (ncell)")
+
+        rprimd_t = np.asarray(supercell_atoms.get_cell().array, dtype=float) * ANGSTROM_TO_BOHR
+        xcart_t = np.asarray(supercell_atoms.get_positions(), dtype=float) * ANGSTROM_TO_BOHR
+        xred_t = np.asarray(supercell_atoms.get_scaled_positions(), dtype=float)
+
+        # target atom i <-> reference atom perm[i]
+        cost = _fractional_distance_matrix(xred_t, ref_xred)
+        perm = _greedy_assignment(cost)
+        worst = float(np.max(cost[np.arange(natom_t), perm]))
+        if worst > 0.25:
+            raise ValueError(
+                f"IFC target '{target.id}': cannot map its supercell onto the "
+                f"fit reference (closest fractional distance {worst:.3f})")
+
+        strain_tensor = _engineering_strain(rprimd_t, inv_ref_rprimd)
+        strain_voigt = _strain_tensor_to_voigt(strain_tensor)
+        ref_xcart_in_t = ref_xred @ rprimd_t.T
+        u_ref_order = xcart_t - ref_xcart_in_t
+        u = u_ref_order[perm]      # target atom order
+
+        k_fixed = phi.copy()
+        for alpha in range(6):
+            phi_alpha = phi_strains[alpha] if alpha < len(phi_strains) else None
+            if phi_alpha is not None:
+                k_fixed = k_fixed + (strain_voigt[alpha] / 3.0) * phi_alpha
+        flat_perm = (3 * perm[:, None] + np.arange(3)[None, :]).reshape(-1)
+        k_fixed_t = k_fixed[np.ix_(flat_perm, flat_perm)] * HA_BOHR2_TO_EV_ANGSTROM2
+
+        n3 = 3 * natom_t
+        residual = (np.asarray(target.ifc, dtype=float) - k_fixed_t).reshape(-1)
+        geo = float(target.weight) / (n3 * n3 * n_active)
+
+        cols = _basis_ifc_columns(basis_list, u, strain_voigt, config.ncell,
+                                  natom_uc, indices=None,
+                                  unit_factor=HA_BOHR2_TO_EV_ANGSTROM2)
+        design = np.asarray(cols, dtype=float).reshape(ncoeff, n3 * n3)
+        rhs += geo * (design @ residual)
+        diagonal += geo * np.einsum("ij,ij->i", design, design)
+        target_norm += geo * float(residual @ residual)
+        designs.append(design)
+
+        ids.append(str(target.id))
+        weights.append(float(target.weight))
+        n3s.append(n3)
+        geo_factors.append(geo)
+        references.append(np.asarray(target.ifc, dtype=float))
+        fixed.append(k_fixed_t)
+        states.append((u.copy(), strain_voigt.copy()))
+
+    def column_fn(target_index, coeff_indices):
+        u, strain_voigt = states[target_index]
+        return _basis_ifc_columns(basis_list, u, strain_voigt, config.ncell,
+                                  natom_uc, indices=tuple(coeff_indices),
+                                  unit_factor=HA_BOHR2_TO_EV_ANGSTROM2)
+
+    # Dense normal only when affordable (<= 512 MB); the design-backed
+    # submatrix/matvec paths are exact for large bases either way.
+    normal = None
+    if ncoeff <= 8192:
+        normal = np.zeros((ncoeff, ncoeff), dtype=float)
+        for k, design_k in enumerate(designs):
+            normal += float(geo_factors[k]) * (design_k @ design_k.T)
+    return IfcFitData(
+        rhs=rhs, diagonal=diagonal, target_norm=target_norm,
+        ids=tuple(ids), weights=tuple(weights), n3s=tuple(n3s),
+        geo_factors=tuple(geo_factors),
+        references=tuple(references), fixed=tuple(fixed),
+        designs=tuple(designs),
+        normal=normal,
+        column_fn=column_fn,
+    )
+
 
 def fit_multibinit_model_python(
     ddb,
@@ -964,6 +1376,7 @@ def fit_multibinit_model_python(
     fixed_model=None,
     weights=None,
     validation_hist=None,
+    ifc_targets=None,
 ) -> PythonFitResult:
     """Fit XML coefficient values from DDB, HIST, and XML basis without Fortran."""
     cfg = config or PythonFitConfig(ncell=(1, 1, 1))
@@ -980,8 +1393,13 @@ def fit_multibinit_model_python(
         basis = read_basis_netcdf(basis_path)
     else:
         basis = load_xml_basis(basis_path)
+    ifc_data = None
+    if ifc_targets:
+        # fourth channel (Story 3): canonical IFC targets contracted onto the
+        # fit reference; pure-Python path only by construction.
+        ifc_data = build_ifc_fit_data(basis, reference, ddb_path, cfg, ifc_targets)
     if cfg.selection == "screened_greedy":
-        solve = _fit_screened_greedy(basis, dataset, cfg, weights=weights)
+        solve = _fit_screened_greedy(basis, dataset, cfg, weights=weights, ifc_data=ifc_data)
         coefficients = solve.coefficients
         diagnostics = solve.diagnostics
         selection_steps = solve.steps
@@ -1021,17 +1439,19 @@ def fit_multibinit_model_python(
             validation_features=validation_features,
             validation_dataset=validation_dataset,
             pure_strain_indices=pure_strain_basis_indices(basis),
+            ifc_data=ifc_data,
         )
         coefficients = solve.coefficients
         diagnostics = solve.diagnostics
         selection_steps = solve.steps
     elif cfg.selection == "lasso":
-        solve = _fit_lasso(features, dataset, cfg, weights=weights)
+        solve = _fit_lasso(features, dataset, cfg, weights=weights, ifc_data=ifc_data)
         coefficients = solve.coefficients
         diagnostics = solve.diagnostics
         selection_steps = solve.steps
     else:
-        solve = solve_weighted_least_squares(features, dataset, cfg, weights=weights)
+        solve = solve_weighted_least_squares(features, dataset, cfg, weights=weights,
+                                              ifc_data=ifc_data)
         coefficients = solve.coefficients
         diagnostics = solve.diagnostics
         selection_steps = ()
@@ -1040,6 +1460,7 @@ def fit_multibinit_model_python(
     if output_xml is not None:
         output_path = write_fitted(Path(output_xml).resolve(), basis, coefficients)
 
+    ifc_report = _ifc_report(ifc_data, coefficients, cfg)
     return PythonFitResult(
         coefficients=coefficients,
         diagnostics=diagnostics,
@@ -1050,7 +1471,43 @@ def fit_multibinit_model_python(
         hist=str(hist_path),
         basis_xml=str(basis_path),
         selection_steps=selection_steps,
+        ifc_report=ifc_report,
     )
+
+
+def _ifc_report(ifc_data: Optional[IfcFitData], coefficients, config: PythonFitConfig) -> Optional[dict]:
+    """Reporting payload for the IFC channel (None when inactive).
+
+    ``coefficients`` is the full-basis vector in every selection mode, so the
+    per-target residuals use the full-basis correction.
+    """
+    if ifc_data is None or ifc_data.empty or config.ifc_factor <= 0.0:
+        return None
+    coeffs = np.asarray(coefficients, dtype=float)
+    per_target = ifc_data.rmse_per_target(coeffs)
+    rmse_all, max_all = ifc_data.rmse(coeffs)
+    return {
+        "ifc_factor": float(config.ifc_factor),
+        "ids": list(ifc_data.ids),
+        "weights": [float(w) for w in ifc_data.weights],
+        "n3s": [int(n) for n in ifc_data.n3s],
+        "geo_factors": [float(g) for g in ifc_data.geo_factors],
+        "n_active": int(ifc_data.n_active),
+        "goal_ifc": float(ifc_data.goal_ifc(coeffs)),
+        "rmse_ev_angstrom2": rmse_all,
+        "max_abs_ev_angstrom2": max_all,
+        "per_target": [
+            {
+                "id": str(ifc_data.ids[k]),
+                "weight": float(ifc_data.weights[k]),
+                "n3": int(ifc_data.n3s[k]),
+                "geo_factor": float(ifc_data.geo_factors[k]),
+                "rmse_ev_angstrom2": per_target[k][0],
+                "max_abs_ev_angstrom2": per_target[k][1],
+            }
+            for k in range(ifc_data.n_active)
+        ],
+    }
 
 
 
@@ -1133,7 +1590,6 @@ def _greedy_quota_candidates(
         return (available_non_pure,)
     return (available_non_pure | surplus_pure,)
 
-
 def select_greedy_coefficients(
     features: FitFeatureMatrices,
     dataset,
@@ -1144,6 +1600,7 @@ def select_greedy_coefficients(
     validation_features=None,
     validation_dataset=None,
     pure_strain_indices=None,
+    ifc_data: Optional[IfcFitData] = None,
 ) -> GreedySelectionResult:
     """Select coefficients greedily by minimizing the configured residual norm."""
     if config.selection != "greedy":
@@ -1189,12 +1646,13 @@ def select_greedy_coefficients(
             pure_set,
             validation_features=validation_features,
             validation_dataset=validation_dataset,
+            ifc_data=ifc_data,
         )
     steps = []
     final_result = None
 
     if selected:
-        final_result = _solve_selected_features(features, dataset, config, selected, weights)
+        final_result = _solve_selected_features(features, dataset, config, selected, weights, ifc_data=ifc_data)
         if final_result.diagnostics.info != 0:
             raise ValueError("Preselected coefficients produce a singular or invalid solve")
 
@@ -1211,7 +1669,7 @@ def select_greedy_coefficients(
                 if eligible is not None and candidate not in eligible:
                     continue
                 trial = selected + (candidate,)
-                result = _solve_selected_features(features, dataset, config, trial, weights)
+                result = _solve_selected_features(features, dataset, config, trial, weights, ifc_data=ifc_data)
                 if result.diagnostics.info != 0:
                     skipped_singular += 1
                     continue
@@ -1229,7 +1687,7 @@ def select_greedy_coefficients(
             "selected": candidate,
             "score": float(final_result.diagnostics.residual_norm),
             "skipped_singular": skipped_singular,
-            "train_rmse": _fit_rmse_components(final_result.coefficients, features, dataset, selected),
+            "train_rmse": _fit_rmse_components(final_result.coefficients, features, dataset, selected, ifc_data=ifc_data),
         }
         if validation_features is not None and validation_dataset is not None:
             step["validation_rmse"] = _fit_rmse_components(
@@ -1238,14 +1696,14 @@ def select_greedy_coefficients(
         steps.append(step)
 
     if final_result is None:
-        final_result = _solve_selected_features(features, dataset, config, (), weights)
+        final_result = _solve_selected_features(features, dataset, config, (), weights, ifc_data=ifc_data)
     coefficients = np.zeros(ncoeff_total, dtype=float)
     if selected:
         coefficients[list(selected)] = final_result.coefficients
     return GreedySelectionResult(selected=selected, coefficients=coefficients, diagnostics=final_result.diagnostics, steps=tuple(steps))
 
 
-def _fit_screened_greedy(basis, dataset, config: PythonFitConfig, weights=None) -> GreedySelectionResult:
+def _fit_screened_greedy(basis, dataset, config: PythonFitConfig, weights=None, ifc_data: Optional[IfcFitData] = None) -> GreedySelectionResult:
     basis_list = list(basis)
     ncoeff_total = len(basis_list)
     target_count = config.ncoeff or ncoeff_total
@@ -1270,7 +1728,10 @@ def _fit_screened_greedy(basis, dataset, config: PythonFitConfig, weights=None) 
         stop = min(start + chunk, ncoeff_total)
         chunk_started = time.monotonic()
         features = evaluate_basis_features(basis_list[start:stop], screening_dataset, config.ncell, backend="numpy")
-        rhs, diagonal, chunk_target_norm = _greedy_rhs_diagonal_target(features, screening_dataset, eval_cfg, screening_weights)
+        rhs, diagonal, chunk_target_norm = _greedy_rhs_diagonal_target(
+            features, screening_dataset, eval_cfg, screening_weights,
+            ifc_data=ifc_data.selected(range(start, stop)) if ifc_data is not None else None,
+        )
         denom = diagonal + config.regularization
         valid = denom > 0.0
         local_scores = np.full(stop - start, np.inf, dtype=float)
@@ -1321,10 +1782,14 @@ def _fit_screened_greedy(basis, dataset, config: PythonFitConfig, weights=None) 
             index for index, global_index in enumerate(pool) if global_index in pure_set
         )
         pool_result = select_greedy_coefficients(
-            pool_features, dataset, pool_cfg, weights=weights, pure_strain_indices=pool_pure_indices
+            pool_features, dataset, pool_cfg, weights=weights, pure_strain_indices=pool_pure_indices,
+            ifc_data=ifc_data.selected(pool) if ifc_data is not None else None,
         )
     else:
-        pool_result = select_greedy_coefficients(pool_features, dataset, pool_cfg, weights=weights)
+        pool_result = select_greedy_coefficients(
+            pool_features, dataset, pool_cfg, weights=weights,
+            ifc_data=ifc_data.selected(pool) if ifc_data is not None else None,
+        )
     coefficients = np.zeros(ncoeff_total, dtype=float)
     selected_global = tuple(pool[index] for index in pool_result.selected)
     coefficients[list(selected_global)] = pool_result.coefficients[list(pool_result.selected)]
@@ -1367,7 +1832,7 @@ def _screening_dataset(dataset: TrainingDataset, nframes: Optional[int]) -> Trai
     )
 
 
-def _fit_lasso(features: FitFeatureMatrices, dataset, config: PythonFitConfig, weights=None):
+def _fit_lasso(features: FitFeatureMatrices, dataset, config: PythonFitConfig, weights=None, ifc_data: Optional[IfcFitData] = None):
     ntime, ncoeff = features.energy.shape
     natom = features.forces.shape[1]
     weights_array = _weights(ntime, weights)
@@ -1396,6 +1861,8 @@ def _fit_lasso(features: FitFeatureMatrices, dataset, config: PythonFitConfig, w
 
     rhs = np.zeros(ncoeff, dtype=float)
     col_sq = np.full(ncoeff, ridge, dtype=float)
+    ifc_active = ifc_data is not None and not ifc_data.empty and config.ifc_factor > 0.0
+    ifc_lam = config.ifc_factor if ifc_active else 0.0
     _chunk = 256
     for mat, y, w2 in zip(mats, ys, w2s):
         rhs += mat.T @ (w2 * y)
@@ -1403,6 +1870,11 @@ def _fit_lasso(features: FitFeatureMatrices, dataset, config: PythonFitConfig, w
             e = min(s + _chunk, ncoeff)
             cols = mat[:, s:e]
             col_sq[s:e] += np.sum(w2[:, None] * cols * cols, axis=0)
+    if ifc_active:
+        # the quadratic term of the IFC channel equals the pre-contracted
+        # accumulators scaled by ifc_factor (derivation D4); no design matrix
+        rhs += ifc_lam * ifc_data.rhs
+        col_sq += ifc_lam * ifc_data.diagonal
 
     def _ista(lam, max_iter=300):
         beta = np.zeros(ncoeff, dtype=float)
@@ -1414,6 +1886,8 @@ def _fit_lasso(features: FitFeatureMatrices, dataset, config: PythonFitConfig, w
             grad = -rhs.copy()
             for mat, w2 in zip(mats, w2s):
                 grad += mat.T @ (w2 * (mat @ z))
+            if ifc_active:
+                grad += ifc_lam * ifc_data.normal_matvec(z)
             nb = z - step * grad
             np.sign(nb, out=nb, where=(np.abs(nb) > thr))
             nb *= np.maximum(np.abs(nb) - thr, 0.0) / np.where(nb != 0, nb, 1.0)
@@ -1454,7 +1928,8 @@ def _fit_lasso(features: FitFeatureMatrices, dataset, config: PythonFitConfig, w
             forces=features.forces[:, :, :, selected],
             stress=features.stress[:, :, selected],
         )
-        result = solve_weighted_least_squares(sliced, dataset, config, weights=weights)
+        result = solve_weighted_least_squares(sliced, dataset, config, weights=weights,
+                                              ifc_data=ifc_data.selected(selected) if ifc_data is not None else None)
         coefficients = np.zeros(ncoeff, dtype=float)
         coefficients[list(selected)] = result.coefficients
         diagnostics = result.diagnostics
@@ -1486,6 +1961,7 @@ def _select_greedy_coefficients_large(
     pure_set: frozenset[int],
     validation_features=None,
     validation_dataset=None,
+    ifc_data: Optional[IfcFitData] = None,
 ) -> GreedySelectionResult:
     """Greedy selector optimized for large candidate bases.
 
@@ -1496,13 +1972,13 @@ def _select_greedy_coefficients_large(
     """
     ncoeff_total = features.energy.shape[1]
     target_count = config.ncoeff or ncoeff_total
-    rhs, diagonal, target_norm = _greedy_rhs_diagonal_target(features, dataset, config, weights)
+    rhs, diagonal, target_norm = _greedy_rhs_diagonal_target(features, dataset, config, weights, ifc_data=ifc_data)
     cross_cache: dict[int, np.ndarray] = {}
     steps = []
     final_result = None
 
     if selected:
-        final_result = _solve_selected_features(features, dataset, config, selected, weights)
+        final_result = _solve_selected_features(features, dataset, config, selected, weights, ifc_data=ifc_data)
         if final_result.diagnostics.info != 0:
             raise ValueError("Preselected coefficients produce a singular or invalid solve")
 
@@ -1514,11 +1990,12 @@ def _select_greedy_coefficients_large(
         selected_list = list(selected)
         selected_set = set(selected)
         selected_normal = _greedy_selected_normal(
-            features, dataset, config, weights, selected_list, cross_cache, diagonal
+            features, dataset, config, weights, selected_list, cross_cache, diagonal,
+            ifc_data=ifc_data,
         )
         selected_rhs = rhs[selected_list] if selected_list else np.zeros(0, dtype=float)
         selected_cross = np.column_stack(
-            [_greedy_normal_column(features, dataset, config, weights, index, cross_cache) for index in selected_list]
+            [_greedy_normal_column(features, dataset, config, weights, index, cross_cache, ifc_data=ifc_data) for index in selected_list]
         ) if selected_list else np.zeros((ncoeff_total, 0), dtype=float)
 
         passes = _greedy_quota_candidates(
@@ -1553,13 +2030,13 @@ def _select_greedy_coefficients_large(
             raise ValueError("Unable to select requested ncoeff; remaining candidates are singular or unavailable")
         _, candidate = best
         selected = selected + (candidate,)
-        final_result = _solve_selected_features(features, dataset, config, selected, weights)
+        final_result = _solve_selected_features(features, dataset, config, selected, weights, ifc_data=ifc_data)
         step = {
             "step": len(selected),
             "selected": candidate,
             "score": float(final_result.diagnostics.residual_norm),
             "skipped_singular": skipped_singular,
-            "train_rmse": _fit_rmse_components(final_result.coefficients, features, dataset, selected),
+            "train_rmse": _fit_rmse_components(final_result.coefficients, features, dataset, selected, ifc_data=ifc_data),
         }
         if validation_features is not None and validation_dataset is not None:
             step["validation_rmse"] = _fit_rmse_components(
@@ -1575,7 +2052,7 @@ def _select_greedy_coefficients_large(
     return GreedySelectionResult(selected=selected, coefficients=coefficients, diagnostics=final_result.diagnostics, steps=tuple(steps))
 
 
-def _greedy_rhs_diagonal_target(features: FitFeatureMatrices, dataset, config: PythonFitConfig, weights):
+def _greedy_rhs_diagonal_target(features: FitFeatureMatrices, dataset, config: PythonFitConfig, weights, ifc_data: Optional[IfcFitData] = None):
     ntime, ncoeff = features.energy.shape
     natom = features.forces.shape[1]
     rhs = np.zeros(ncoeff, dtype=float)
@@ -1616,10 +2093,15 @@ def _greedy_rhs_diagonal_target(features: FitFeatureMatrices, dataset, config: P
         diagonal += factor * np.einsum("ij,i,ij->j", design, row_weights, design, optimize=True)
         target_norm += factor * float(np.sum(target * weighted_target))
 
+    if ifc_data is not None and not ifc_data.empty and config.ifc_factor > 0.0:
+        rhs += config.ifc_factor * ifc_data.rhs
+        diagonal += config.ifc_factor * ifc_data.diagonal
+        target_norm += config.ifc_factor * ifc_data.target_norm
+
     return rhs, diagonal, target_norm
 
 
-def _greedy_normal_column(features, dataset, config, weights, index: int, cache: dict[int, np.ndarray]) -> np.ndarray:
+def _greedy_normal_column(features, dataset, config, weights, index: int, cache: dict[int, np.ndarray], ifc_data: Optional[IfcFitData] = None) -> np.ndarray:
     if index in cache:
         return cache[index]
     ntime, ncoeff = features.energy.shape
@@ -1648,15 +2130,18 @@ def _greedy_normal_column(features, dataset, config, weights, index: int, cache:
         factor = energy_factor / ntime
         column += factor * (design.T @ (design[:, index] * row_weights))
 
+    if ifc_data is not None and not ifc_data.empty and config.ifc_factor > 0.0:
+        column += config.ifc_factor * ifc_data.normal_column(index)
+
     cache[index] = column
     return column
 
 
-def _greedy_selected_normal(features, dataset, config, weights, selected: list[int], cache, diagonal) -> np.ndarray:
+def _greedy_selected_normal(features, dataset, config, weights, selected: list[int], cache, diagonal, ifc_data: Optional[IfcFitData] = None) -> np.ndarray:
     nselected = len(selected)
     normal = np.zeros((nselected, nselected), dtype=float)
     for j, index in enumerate(selected):
-        column = _greedy_normal_column(features, dataset, config, weights, index, cache)
+        column = _greedy_normal_column(features, dataset, config, weights, index, cache, ifc_data=ifc_data)
         normal[:, j] = column[selected]
     if nselected:
         normal[np.diag_indices(nselected)] = diagonal[selected]
@@ -1707,7 +2192,7 @@ def _greedy_trial_score(
     return float(np.sqrt(max(score_sq, 0.0)))
 
 
-def _fit_rmse_components(coefficients, features: FitFeatureMatrices, dataset, selected) -> dict[str, float]:
+def _fit_rmse_components(coefficients, features: FitFeatureMatrices, dataset, selected, ifc_data: Optional[IfcFitData] = None) -> dict[str, float]:
     selected = tuple(selected)
     coeffs = np.asarray(coefficients, dtype=float)
     if len(selected) != coeffs.shape[0]:
@@ -1724,11 +2209,16 @@ def _fit_rmse_components(coefficients, features: FitFeatureMatrices, dataset, se
     relative_energy_residual = energy_residual - energy_residual[0]
     force_residual = dataset.force_diff - force_fit
     stress_residual = dataset.stress_diff - stress_fit
-    return {
+    result = {
         "relative_energy_ha": float(np.sqrt(np.mean(relative_energy_residual**2))),
         "forces_ha_bohr": float(np.sqrt(np.mean(force_residual**2))),
         "stress_ha_bohr3": float(np.sqrt(np.mean(stress_residual**2))),
     }
+    if ifc_data is not None and not ifc_data.empty:
+        ifc_rmse, ifc_max_abs = ifc_data.rmse(coeffs, selected)
+        result["ifc_rmse_ev_angstrom2"] = ifc_rmse
+        result["ifc_max_abs_ev_angstrom2"] = ifc_max_abs
+    return result
 
 
 def normalize_pair_key(key: PairKey) -> tuple[PairKey, int]:
@@ -1985,6 +2475,7 @@ def train_multibinit_model(
     extra_args: Optional[Sequence[str]] = None,
     timeout: Optional[float] = None,
     env: Optional[Mapping[str, str]] = None,
+    ifc_targets=None,
 ) -> MultibinitTrainingResult:
     """Build a MULTIBINIT model by invoking the ``multibinit`` executable.
 
@@ -1992,6 +2483,13 @@ def train_multibinit_model(
     logs, and records deterministic metadata. The actual model-building
     semantics remain owned by the MULTIBINIT input file and executable.
     """
+    if ifc_targets:
+        # FR-008 gate: the Fortran binary has no IFC fitting surface; refuse
+        # loudly instead of silently dropping the channel.
+        raise ValueError(
+            "IFC targets are not supported by the multibinit binary path; "
+            "use fit_multibinit_model_python(..., ifc_targets=...) instead")
+
     ddb_path = _existing_path(ddb, "DDB file")
     hist_path = _existing_path(hist, "HIST file")
     config_path = _existing_path(config, "configuration file") if config is not None else None
@@ -2213,7 +2711,7 @@ def _dataset_arrays(dataset, ntime: int, natom: int):
     return energy_diff, force_diff, stress_diff, sqomega
 
 
-def _normal_equations(features: FitFeatureMatrices, dataset, config: PythonFitConfig, weights: np.ndarray):
+def _normal_equations(features: FitFeatureMatrices, dataset, config: PythonFitConfig, weights: np.ndarray, ifc_data: Optional[IfcFitData] = None):
     ntime, ncoeff = features.energy.shape
     natom = features.forces.shape[1]
     normal = np.zeros((ncoeff, ncoeff), dtype=float)
@@ -2246,11 +2744,15 @@ def _normal_equations(features: FitFeatureMatrices, dataset, config: PythonFitCo
         normal += factor * (design.T @ (design * row_weights[:, None]))
         rhs += factor * (design.T @ (target * row_weights))
 
+    if ifc_data is not None and not ifc_data.empty and config.ifc_factor > 0.0:
+        normal += config.ifc_factor * ifc_data.submatrix(range(normal.shape[0]))
+        rhs += config.ifc_factor * ifc_data.rhs
+
     return normal, rhs
 
 
-def _weighted_residual_norm(coefficients, features: FitFeatureMatrices, dataset, weights, config: PythonFitConfig) -> float:
-    goal = compute_goal_function(coefficients, features, dataset, weights)
+def _weighted_residual_norm(coefficients, features: FitFeatureMatrices, dataset, weights, config: PythonFitConfig, ifc_data: Optional[IfcFitData] = None) -> float:
+    goal = compute_goal_function(coefficients, features, dataset, weights, ifc_data=ifc_data)
     force_on, stress_on, energy_on = config.fit_on
     total = 0.0
     if force_on:
@@ -2259,6 +2761,8 @@ def _weighted_residual_norm(coefficients, features: FitFeatureMatrices, dataset,
         total += goal.stress * config.fit_factors[1]
     if energy_on:
         total += goal.energy * config.fit_factors[2]
+    if ifc_data is not None and not ifc_data.empty and config.ifc_factor > 0.0:
+        total += goal.ifc * config.ifc_factor
     return float(np.sqrt(total))
 
 
@@ -2411,7 +2915,7 @@ def _disp_diff(displacement: np.ndarray, disp: Mapping[str, object]) -> np.ndarr
     return displacement[disp["idx_a"], disp["direction"]] - displacement[disp["idx_b"], disp["direction"]]
 
 
-def _solve_selected_features(features: FitFeatureMatrices, dataset, config: PythonFitConfig, selected, weights):
+def _solve_selected_features(features: FitFeatureMatrices, dataset, config: PythonFitConfig, selected, weights, ifc_data: Optional[IfcFitData] = None):
     selected = tuple(selected)
     if not selected:
         empty = FitFeatureMatrices(
@@ -2419,17 +2923,21 @@ def _solve_selected_features(features: FitFeatureMatrices, dataset, config: Pyth
             forces=np.zeros((features.forces.shape[0], features.forces.shape[1], 3, 0), dtype=float),
             stress=np.zeros((features.stress.shape[0], 6, 0), dtype=float),
         )
-        goal = compute_goal_function(np.zeros(0), empty, dataset, weights)
+        ifc_selected = ifc_data.selected(()) if ifc_data is not None else None
+        goal = compute_goal_function(np.zeros(0), empty, dataset, weights,
+                                     ifc_data=ifc_selected)
         return LinearFitResult(
             coefficients=np.zeros(0, dtype=float),
-            diagnostics=FitDiagnostics(goal=goal, residual_norm=_weighted_residual_norm(np.zeros(0), empty, dataset, _weights(features.energy.shape[0], weights), config), matrix_rank=0, condition_number=0.0, regularization=config.regularization, info=0),
+            diagnostics=FitDiagnostics(goal=goal, residual_norm=_weighted_residual_norm(np.zeros(0), empty, dataset, _weights(features.energy.shape[0], weights), config, ifc_data=ifc_selected), matrix_rank=0, condition_number=0.0, regularization=config.regularization, info=0),
         )
     sliced = FitFeatureMatrices(
         energy=features.energy[:, selected],
         forces=features.forces[:, :, :, selected],
         stress=features.stress[:, :, selected],
     )
-    return solve_weighted_least_squares(sliced, dataset, config, weights=weights)
+    ifc_selected = ifc_data.selected(selected) if ifc_data is not None else None
+    return solve_weighted_least_squares(sliced, dataset, config, weights=weights,
+                                        ifc_data=ifc_selected)
 
 
 def _transform_direction(direction: int, rotation: np.ndarray) -> tuple[int, int]:

@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-09-04
+
+### Added
+- **IFC-aware model fitting** (`fitwithphonon` feature line): Cartesian
+  interatomic force-constant matrices as a fourth linear least-squares
+  channel beside energy, forces, and stress — fitting FC matrices, never
+  phonon frequencies.
+  - `pymultibinit.pyeffpot.ifc_targets`: canonical `IfcTargetSpec`
+    (import from `FORCE_CONSTANTS` + provenance sidecar, or generate by
+    symmetry-reduced finite differences with any ASE calculator),
+    `load_ifc_target` / `generate_ifc_target` with fingerprinted caching,
+    reciprocal/ASR validation, `IfcUnitCell` shared Phonopy skeleton,
+    `fixed_ifc`/`with_fitted_values` (K_fixed, exact by coefficient
+    linearity).
+  - `fit_multibinit_model_python(..., ifc_targets=...)`: channel with
+    mean-normalized Frobenius residual (per-target weight
+    `w_k/((3N_k)^2 n_active)`, global `PythonFitConfig.ifc_factor`),
+    design-backed accumulators exact at any basis size,
+    `PythonFitResult.ifc_report` with per-target RMSE/max-abs in
+    eV/angstrom^2; greedy/lasso/screened-greedy all IFC-aware.
+  - Symbolic derivation artifact `docs/derivations/ifc_fitting_derivation.md`
+    (+ sympy script) covering term energies, product-rule per-term IFC
+    features, coefficient linearity, objective/normal equations, greedy
+    closed forms, and unit conversion — all machine-verified.
+- `docs/PURE_PYTHON_TRAINING.md`: IFC fitting channel section.
+
+### Fixed
+- **IFC accumulator exactness**: the chunked normal accumulation filled
+  only within-chunk diagonal blocks; cross-chunk terms were dropped, so
+  `goal_ifc` could evaluate negative and multi-chunk bases were not
+  solved as true least squares. Accumulators are now per-target
+  design-matrix backed (`submatrix`/`normal_matvec`/`normal_column`),
+  exact at any basis size (dense normal cached only for small bases).
+
 ### Added
 - **Energy/force/stress decomposition API**: Decompose the total energy, forces,
   and stress into per-term contributions (reference, local harmonic IFCs,

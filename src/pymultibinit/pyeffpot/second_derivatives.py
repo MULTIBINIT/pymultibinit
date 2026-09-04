@@ -257,25 +257,8 @@ def _fitted_term_blocks(potential, u, strain_voigt, ifc, elastic, coupling,
         # ncell origins: prod_disp = ones(ncells) in _evaluate_anharmonic.
         sum_prod = float(prod_all.sum()) if F else float(potential.supercell.ncells)
 
-        # ---- d2E/du du : ordered factor pairs ----
-        for f in range(F):
-            pf = pows[f]
-            for g in range(F):
-                pg = pows[g]
-                if f == g:
-                    if pf < 2:
-                        continue
-                    pref = (c * s_val() * pf * (pf - 1)
-                            * _pow_guard(d_vals[f], pf - 2) * prod_others((f,)))
-                    _scatter_pair(ifc, idx_a[f], idx_b[f], dirs[f],
-                                  idx_a[f], idx_b[f], dirs[f], pref)
-                else:
-                    pref = (c * s_val() * pf * pg
-                            * _pow_guard(d_vals[f], pf - 1)
-                            * _pow_guard(d_vals[g], pg - 1)
-                            * prod_others((f, g)))
-                    _scatter_pair(ifc, idx_a[f], idx_b[f], dirs[f],
-                                  idx_a[g], idx_b[g], dirs[g], pref)
+        # ---- d2E/du du : shared ordered-pair product-rule scatter ----
+        _term_ifc_scatter(ifc, d_vals, idx_a, idx_b, dirs, pows, s_val(), c)
 
         # ---- d2E/deta du ----
         for s_idx in range(S):
@@ -326,6 +309,45 @@ def _fitted_term_blocks(potential, u, strain_voigt, ifc, elastic, coupling,
             flat_b = 3 * idx_b[f] + dirs[f]
             np.add.at(forces.reshape(-1), flat_a, -pref)
             np.add.at(forces.reshape(-1), flat_b, pref)
+
+def _term_ifc_scatter(ifc, d_vals, idx_a, idx_b, dirs, pows, s_val, scale) -> None:
+    """Ordered-pair product-rule scatter of one term's d2E/du2 (derivation D2).
+
+    ``d_vals[f]``/``idx_a[f]``/``idx_b[f]``/``dirs[f]``/``pows[f]`` are the
+    compiled displacement factors (per-factor arrays over cell origins),
+    ``s_val`` the strain monomial value, and ``scale`` the coefficient scale
+    (``value * weight`` for potential terms, the term weight for unit-value
+    training columns). Signs: d = u[a] - u[b] gives (+) on (a,a)/(b,b) and
+    (-) on (a,b)/(b,a); ordered factor pairs count both orderings while a
+    single factor's cross terms are counted once.
+    """
+    n_factors = len(d_vals)
+
+    def prod_others(exclude):
+        out = np.ones_like(d_vals[0])
+        for h in range(n_factors):
+            if h not in exclude:
+                out = out * d_vals[h] ** pows[h]
+        return out
+
+    for f in range(n_factors):
+        pf = pows[f]
+        for g in range(n_factors):
+            pg = pows[g]
+            if f == g:
+                if pf < 2:
+                    continue
+                pref = (scale * s_val * pf * (pf - 1)
+                        * _pow_guard(d_vals[f], pf - 2) * prod_others((f,)))
+                _scatter_pair(ifc, idx_a[f], idx_b[f], dirs[f],
+                              idx_a[f], idx_b[f], dirs[f], pref)
+            else:
+                pref = (scale * s_val * pf * pg
+                        * _pow_guard(d_vals[f], pf - 1)
+                        * _pow_guard(d_vals[g], pg - 1)
+                        * prod_others((f, g)))
+                _scatter_pair(ifc, idx_a[f], idx_b[f], dirs[f],
+                              idx_a[g], idx_b[g], dirs[g], pref)
 
 
 def _scatter_pair(ifc, ia1, ib1, mu1, ia2, ib2, mu2, pref) -> None:

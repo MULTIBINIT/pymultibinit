@@ -130,6 +130,15 @@ If no fixed model is supplied, the fixed model is zero.
 
 When constructing a DDB-backed fixed model manually, match the MULTIBINIT input `dipdip` setting. For example, use `build_supercell(unitcell, ncell, dipdip=False)` when the fitting input has `dipdip 0`; otherwise Python will recompute/add dipole-dipole IFCs whenever Born charges are present.
 
+## IFC Fitting Channel
+
+`fit_multibinit_model_python(..., ifc_targets=...)` adds Cartesian interatomic force-constant matrices as a fourth linear channel alongside energy, forces, and stress. The objective fits **force-constant matrices**, never phonon frequencies:
+
+- `pymultibinit.pyeffpot.ifc_targets` provides `IfcTargetSpec` (import from `FORCE_CONSTANTS` + sidecar JSON, or generate by symmetry-reduced finite differences with any ASE calculator), `load_ifc_target`, and `generate_ifc_target`.
+- The per-target residual is `K_model - K_target` in eV/Angstrom^2, normalized by `weight / ((3N)^2 * n_active)` with the global channel weight `PythonFitConfig.ifc_factor`.
+- The model-side sensitivity is exact by coefficient linearity: the analytic second derivative of every basis term is derived and verified symbolically in `docs/derivations/ifc_fitting_derivation.md` (companion sympy script in the same directory).
+- `PythonFitResult.ifc_report` carries per-target RMSE/max-abs and the goal contribution; `IfcFitData.rmse_per_target` evaluates held-out coefficients against arbitrary targets.
+
 ## Loading An XML Basis
 
 `load_xml_basis()` converts parsed MULTIBINIT XML coefficients into immutable `XmlBasisFunction` objects.

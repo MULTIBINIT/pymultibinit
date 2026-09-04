@@ -252,8 +252,18 @@ def train_model(ddb: str, hist: str, config: Optional[str] = None,
                 output_dir: str = "multibinit_training",
                 executable: Optional[str] = None,
                 extra_args: Optional[list[str]] = None,
+                ifc_config: Optional[str] = None,
                 verbose: bool = False) -> int:
     """Build a MULTIBINIT model by calling the multibinit binary."""
+    if ifc_config:
+        # FR-008 gate: the binary has no IFC fitting surface; fail loudly
+        # instead of silently ignoring the channel.
+        print(
+            "Error: IFC targets are not supported by the multibinit binary "
+            f"({ifc_config}); use 'mbtools train-python --ifc-target ...' instead",
+            file=sys.stderr,
+        )
+        return 1
     try:
         from pymultibinit.training import train_multibinit_model
     except ImportError as e:
@@ -291,7 +301,9 @@ def train_model_python(ddb: str, hist: str, basis_xml: str, output_xml: str,
                        diagnostics_json: str, ncell: tuple[int, int, int],
                        selection: str = "all", ncoeff: Optional[int] = None,
                        regularization: float = 0.0, verbose: bool = False,
-                       min_pure_strain_ratio: float = 0.05) -> int:
+                       min_pure_strain_ratio: float = 0.05,
+                       ifc_factor: Optional[float] = None,
+                       ifc_targets: Optional[list[str]] = None) -> int:
     """Fit a MULTIBINIT XML model using the pure-Python pipeline."""
     try:
         from pymultibinit.training import PythonFitConfig, fit_multibinit_model_python
@@ -300,19 +312,33 @@ def train_model_python(ddb: str, hist: str, basis_xml: str, output_xml: str,
         return 1
 
     try:
-        config = PythonFitConfig(
-            ncell=ncell,
-            selection=selection,
-            ncoeff=ncoeff,
-            regularization=regularization,
-            min_pure_strain_ratio=min_pure_strain_ratio,
-        )
+        config_kwargs = {
+            "ncell": ncell,
+            "selection": selection,
+            "ncoeff": ncoeff,
+            "regularization": regularization,
+            "min_pure_strain_ratio": min_pure_strain_ratio,
+        }
+        if ifc_factor is not None:
+            config_kwargs["ifc_factor"] = ifc_factor
+        targets = None
+        if ifc_targets:
+            from pymultibinit.pyeffpot.ifc_targets import (
+                IfcTargetSpec,
+                load_ifc_target,
+            )
+            targets = [
+                load_ifc_target(IfcTargetSpec(id=Path(t).stem, mode="import", fc_file=t))
+                for t in ifc_targets
+            ]
+        config = PythonFitConfig(**config_kwargs)
         result = fit_multibinit_model_python(
             ddb=ddb,
             hist=hist,
             basis_xml=basis_xml,
             output_xml=output_xml,
             config=config,
+            ifc_targets=targets,
         )
         diagnostics_path = Path(diagnostics_json)
         diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -349,6 +375,7 @@ def _python_fit_diagnostics(result) -> dict:
             "force": _json_float(goal.force),
             "stress": _json_float(goal.stress),
             "energy": _json_float(goal.energy),
+            "ifc": _json_float(getattr(goal, "ifc", 0.0)),
         },
         "residual_norm": _json_float(diag.residual_norm),
         "matrix_rank": diag.matrix_rank,
@@ -510,6 +537,8 @@ Examples:
                               help='Print detailed information')
     train_parser.add_argument('--binary-arg', dest='extra_args', action='append', default=[],
                               help='Additional argument passed to the multibinit binary. Repeat for multiple arguments.')
+    train_parser.add_argument('--ifc-config', type=str, default=None,
+                              help='Rejected: the multibinit binary has no IFC fitting surface (use train-python --ifc-target)')
 
     train_python_parser = subparsers.add_parser(
         'train-python',
@@ -533,6 +562,10 @@ Examples:
         default=0.05,
         help='Minimum pure-strain fraction reserved by greedy selection',
     )
+    train_python_parser.add_argument('--ifc-factor', type=float, default=None,
+                                     help='Global weight of the IFC fitting channel (default 1.0 when targets are given)')
+    train_python_parser.add_argument('--ifc-target', dest='ifc_targets', action='append', default=None,
+                                     help='FORCE_CONSTANTS (or .hdf5) file of one canonical IFC target with its sidecar. Repeat for multiple targets.')
     train_python_parser.add_argument('--verbose', '-v', action='store_true', help='Print detailed information')
 
     # Parse arguments
@@ -616,6 +649,7 @@ Examples:
             output_dir=args.output_dir,
             executable=args.executable,
             extra_args=args.extra_args,
+            ifc_config=getattr(args, 'ifc_config', None),
             verbose=args.verbose,
         )
 
@@ -647,6 +681,8 @@ Examples:
             ncoeff=args.ncoeff,
             regularization=args.regularization,
             min_pure_strain_ratio=args.min_pure_strain_ratio,
+            ifc_factor=args.ifc_factor,
+            ifc_targets=args.ifc_targets,
             verbose=args.verbose,
         )
 
