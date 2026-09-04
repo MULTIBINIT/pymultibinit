@@ -251,6 +251,7 @@ class PythonFitResult:
     hist: str
     basis_xml: str
     selection_steps: tuple[Mapping[str, object], ...] = ()
+    ifc_report: Optional[dict] = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -1065,6 +1066,16 @@ class IfcFitData:
                              dtype=float)
         return np.einsum("jab,j->ab", columns, coeffs)
 
+    def rmse_per_target(self, coefficients, selected=()) -> list:
+        """[(rmse, max_abs)] per active target, eV/Angstrom^2."""
+        out = []
+        for k in range(self.n_active):
+            residual = (self.references[k] - self.fixed[k]
+                        - self.correction(k, coefficients, selected))
+            out.append((float(np.sqrt(np.mean(residual ** 2))),
+                        float(np.abs(residual).max())))
+        return out
+
     def rmse(self, coefficients, selected=()) -> tuple:
         """(rmse, max_abs) over all active targets, eV/Angstrom^2."""
         residual_sq = 0.0
@@ -1368,6 +1379,7 @@ def fit_multibinit_model_python(
     if output_xml is not None:
         output_path = write_fitted(Path(output_xml).resolve(), basis, coefficients)
 
+    ifc_report = _ifc_report(ifc_data, coefficients, cfg)
     return PythonFitResult(
         coefficients=coefficients,
         diagnostics=diagnostics,
@@ -1378,7 +1390,43 @@ def fit_multibinit_model_python(
         hist=str(hist_path),
         basis_xml=str(basis_path),
         selection_steps=selection_steps,
+        ifc_report=ifc_report,
     )
+
+
+def _ifc_report(ifc_data: Optional[IfcFitData], coefficients, config: PythonFitConfig) -> Optional[dict]:
+    """Reporting payload for the IFC channel (None when inactive).
+
+    ``coefficients`` is the full-basis vector in every selection mode, so the
+    per-target residuals use the full-basis correction.
+    """
+    if ifc_data is None or ifc_data.empty or config.ifc_factor <= 0.0:
+        return None
+    coeffs = np.asarray(coefficients, dtype=float)
+    per_target = ifc_data.rmse_per_target(coeffs)
+    rmse_all, max_all = ifc_data.rmse(coeffs)
+    return {
+        "ifc_factor": float(config.ifc_factor),
+        "ids": list(ifc_data.ids),
+        "weights": [float(w) for w in ifc_data.weights],
+        "n3s": [int(n) for n in ifc_data.n3s],
+        "geo_factors": [float(g) for g in ifc_data.geo_factors],
+        "n_active": int(ifc_data.n_active),
+        "goal_ifc": float(ifc_data.goal_ifc(coeffs)),
+        "rmse_ev_angstrom2": rmse_all,
+        "max_abs_ev_angstrom2": max_all,
+        "per_target": [
+            {
+                "id": str(ifc_data.ids[k]),
+                "weight": float(ifc_data.weights[k]),
+                "n3": int(ifc_data.n3s[k]),
+                "geo_factor": float(ifc_data.geo_factors[k]),
+                "rmse_ev_angstrom2": per_target[k][0],
+                "max_abs_ev_angstrom2": per_target[k][1],
+            }
+            for k in range(ifc_data.n_active)
+        ],
+    }
 
 
 
