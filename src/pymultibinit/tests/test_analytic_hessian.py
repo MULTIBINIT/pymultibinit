@@ -1,122 +1,173 @@
-"""TDD validation: analytic second-derivative blocks vs FD (Story 1-4 core).
+"""Tests for analytic second-derivative blocks (pyeffpot.second_derivatives).
 
-Requires: pymultibinit editable installed (PYTHONPATH=src). JAX tests skip
-if import fails. FD reference uses atomchain conventions (engineering-strain,
-clamped-ion elastic, −dF/dε coupling).
+Validates HessianBlocks / elastic_affine / coupling_fixed_xcart against
+finite differences of EffectivePotential itself on the fitted BaTiO3 model
+(rattle_fw_s0.25). Conventions: Bohr/Hartree, engineering Voigt strain
+(xx,yy,zz,yz,xz,xy), atom-major flat indices (3*atom + dir).
+
+Skips (with reason) when the reference model files are absent.
 """
 from __future__ import annotations
 
-import pytest
-import numpy as np
-import sys
+import os
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[2] / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+import numpy as np
+import pytest
 
 from pymultibinit.pyeffpot.potential import EffectivePotential
-from pymultibinit.pyeffpot.second_derivatives import analytic_blocks, elastic_affine, get_analytic_blocks, HessianBlocks
+from pymultibinit.pyeffpot.second_derivatives import (
+    HessianBlocks,
+    analytic_blocks,
+    coupling_fixed_xcart,
+    elastic_affine,
+)
+
+FW = Path("/home/hexu/projects/atomchain_dev/atomchain/examples/"
+          "08_training_set_strategies_batio3/batio3_rattle_fw_s0.25")
+DDB = FW / "ddb" / "model.ddb"
+XML = FW / "model" / "fitted.nc"
+
+VOIGT_PAIRS = ((0, 0), (1, 1), (2, 2), (2, 1), (2, 0), (1, 0))
 
 
-@pytest.fixture(scope="session")
-def pot_cubic():
-    """A small cubic reference potential for quick FD parity test.
-    Uses the BaTiO3 rattle_fw_s0.25 model's cubic reference."""
-    # Path to the fitted model reference DDB (cubic 5-atom, small ncell for speed)
-    model_path = Path.home() / ".tmp/phonon_metastable/dbg_ref"
-    ddb_ref = "/home/hexu/projects/atomchain_dev/atomchain/examples/08_training_set_strategies_batio3/batio3_rattle_fw_s0.25/model/model.ddb"
-    xml_ref = "/home/hexu/projects/atomchain_dev/atomchain/examples/08_training_set_strategies_batio3/batio3_rattle_fw_s0.25/model/fitted.nc"
-    # Fallback to direct import if file missing; use any available DDB in repo
-    import glob
-    ddb_candidates = list(Path("/home/hexu/projects/atomchain_dev/pymultibinit").rglob("*.ddb"))
-    ddb_path = ddb_ref if Path(ddb_ref).exists() else (str(ddb_candidates[0]) if ddb_candidates else None)
-    if ddb_path is None or not Path(ddb_path).exists():
-        pytest.skip("No reference DDB available; requires fitted model reference.")
-    xml_path = xml_ref if Path(xml_ref).exists() else None
-    pot = EffectivePotential.from_files(
-        ddb_file=str(ddb_path), xml_file=str(xml_path) if xml_path and Path(xml_path).exists() else None,
-        ncell=(2, 2, 2), dipdip=True, asr=True,
-    )
+@pytest.fixture(scope="module")
+def potential():
+    ddb = os.environ.get("PMB_TEST_DDB", str(DDB))
+    xml = os.environ.get("PMB_TEST_XML", str(XML))
+    if not (Path(ddb).exists() and Path(xml).exists()):
+        pytest.skip(f"reference model not found: {ddb}")
+    pot = EffectivePotential.from_files(ddb_file=ddb, xml_file=xml, ncell=(2, 2, 2))
+    pot._use_jax = False  # exact numpy path for FD comparisons
     return pot
 
 
-def test_analytic_blocks_has_right_shape(pot_cubic):
-    """Story 1: fixed-channel blocks have correct shape and nonzero harmonic IFC."""
-    sc = pot_cubic.supercell
-    natom_sc = sc.natom_sc
-    n_targets = 3 * natom_sc
-    # Reference displacements = zero; small nonzero strain
-    u = np.zeros((natom_sc, 3), dtype=float)
-    eta = np.eye(3, dtype=float) * 0.0
-    blocks = analytic_blocks(pot_cubic, u, eta)
-    # Basic shape checks
-    assert blocks.ifc.shape == (n_targets, n_targets)
-    assert blocks.elastic_fixed_u.shape == (6, 6)
-    assert blocks.coupling.shape == (6, n_targets)
-    assert blocks.forces_at_config.shape == (natom_sc, 3)
-    # Harmonic IFC should match phi_matrix at zero displacement (constant)
-    if pot_cubic._phi_matrix is not None:
-        np.testing.assert_allclose(blocks.ifc, pot_cubic._phi_matrix, rtol=1e-10)
-    # Elastic should equal N_c * C (clamped-ion base, no chain-rule here)
-    C_uc = getattr(sc.unitcell, "elastic_constants", None)
-    if C_uc is not None:
-        expected = float(sc.ncells) * np.asarray(C_uc, dtype=float)
-        if expected.shape == (6, 6):
-            np.testing.assert_allclose(blocks.elastic_fixed_u, expected, rtol=1e-8)
+@pytest.fixture(scope="module")
+def config(potential):
+    rng = np.random.default_rng(42)
+    ref = potential.supercell.crystal_sc.xcart
+    rprimd0 = potential._reference_lattice
+    u = rng.normal(scale=0.05, size=(potential.supercell.natom_sc, 3))
+    xcart = ref + u
+    eta = np.zeros((3, 3))
+    return u, eta, xcart, rprimd0
 
 
-def test_analytic_blocks_strain_contributes(pot_cubic):
-    """Story 1: nonzero strain produces nonzero elastic + coupling updates."""
-    sc = pot_cubic.supercell
-    natom_sc = sc.natom_sc
-    eta_small = np.eye(3, dtype=float) * 1e-3  # small engineering strain
-    u_small = np.zeros((natom_sc, 3), dtype=float)
-    blocks_strain = analytic_blocks(pot_cubic, u_small, eta_small)
-    # Elastic should now include N_c * C (independent of u)
-    assert blocks_strain.elastic_fixed_u.sum() != 0.0
-    # Coupling should have lambda contribution if model loaded
+def test_blocks_shapes_and_symmetry(potential, config):
+    u, eta, xcart, rprimd0 = config
+    bl = analytic_blocks(potential, u, eta)
+    n3 = 3 * potential.supercell.natom_sc
+    assert bl.ifc.shape == (n3, n3)
+    assert bl.elastic_fixed_u.shape == (6, 6)
+    assert bl.coupling.shape == (6, n3)
+    assert bl.forces.shape == u.shape
+    np.testing.assert_allclose(bl.ifc, bl.ifc.T, atol=1e-10)
+    np.testing.assert_allclose(bl.elastic_fixed_u, bl.elastic_fixed_u.T, atol=1e-10)
+    with pytest.raises(ValueError):
+        analytic_blocks(potential, u[:, :2], eta)
 
 
-def test_elastic_affine_construct(pot_cubic):
-    """Story 2: elastic_affine produces (6,6) and chain-rule correction (6,6)."""
-    sc = pot_cubic.supercell
-    natom_sc = sc.natom_sc
-    u0 = np.zeros((natom_sc, 3), dtype=float)
-    eta_small = np.eye(3) * 1e-3
-    C_aff, C_corr = elastic_affine(pot_cubic, u0, eta_small)
-    assert C_aff.shape == (6, 6)
-    assert C_corr.shape == (6, 6)
-    # Correction should be small (order strain) since u=0 => du/deta = 0 (no u term)
-    # At u=0 the chain terms vanish except the pure u-independent part.
-    # So C_corr ≈ 0 at u=0 (within float error); this validates the chain-rule logic.
-    # This assertion verifies the structural behavior, not a numerical claim.
+def test_forces_match_evaluator(potential, config):
+    """HessianBlocks.forces (F = -dE/du) equals the evaluator forces."""
+    u, eta, xcart, rprimd0 = config
+    bl = analytic_blocks(potential, u, eta)
+    F = potential.evaluate(xcart, rprimd0)[1]
+    assert np.abs(F - bl.forces).max() < 1e-9
 
 
-def test_unit_boundary_api_roundtrip(pot_cubic):
-    """Story 3: MultibinitPotential wrapper returns same result in eV/Å.
-    This verifies the ASE-surface path without requiring full build verification."""
-    # Minimal: verify wrapper exists and returns 4 outputs with correct shapes
-    # when given a small synthetic Atoms-like structure mapped back.
-    tests = True  # placeholder for full wrapper; structure tested above covers it.
-    assert tests
+def test_ifc_matches_force_fd(potential, config):
+    """d2E/du du vs central differences of evaluator forces (O(h^2))."""
+    u, eta, xcart, rprimd0 = config
+    bl = analytic_blocks(potential, u, eta)
+    h = 1e-5
+    rng = np.random.default_rng(7)
+    cols = rng.choice(3 * potential.supercell.natom_sc, size=6, replace=False)
+    for c in cols:
+        n, mu = divmod(int(c), 3)
+        xp = xcart.copy(); xp[n, mu] += h
+        xm = xcart.copy(); xm[n, mu] -= h
+        fd = (potential.evaluate(xp, rprimd0)[1]
+              - potential.evaluate(xm, rprimd0)[1]) / (2 * h)
+        np.testing.assert_allclose(fd, -bl.ifc[:, c].reshape(-1, 3), atol=1e-6)
 
 
-def test_analytic_vs_fd_force_consistency(pot_cubic):
-    """Story 4 (initial): analytic harmonic forces match -Φ·u (constant Hessian)."""
-    sc = pot_cubic.supercell
-    natom_sc = sc.natom_sc
-    # Small random displacement
-    np.random.seed(42)
-    u_small = np.random.normal(scale=0.02, size=(natom_sc, 3)).astype(float)
-    eta_small = np.eye(3) * 1e-4
-    blocks = analytic_blocks(pot_cubic, u_small, eta_small)
-    # Forces = -Φ·u (first-derivative relationship, verified by construction)
-    if pot_cubic._phi_matrix is not None:
-        expected_forces = -(pot_cubic._phi_matrix @ u_small.reshape(-1)).reshape(natom_sc, 3)
-        # Note: forces_config includes harmonic forces + chain terms (0 at small eta/u=reference)
-        # At arbitrary u, harmonic forces dominate; compare magnitude order.
-        # Exact equality requires no anharmonic terms; with fitted model there is a residual.
-        # This assertion verifies structural consistency, not machine equality.
-        np.testing.assert_allclose(blocks.forces_at_config, expected_forces, rtol=0.3,
-                                   err_msg="Forces diverge structurally from -Φ·u; check chain terms")
+def test_coupling_matches_force_fd_fixed_xcart(potential, config):
+    """Force response to strain at fixed xcart.
+
+    dF/deta_nu = -coupling[nu] + ifc @ flat(x_ref @ E_nu @ R^T)
+    (min-image displacement frame; see coupling_fixed_xcart docstring).
+    """
+    u, eta, xcart, rprimd0 = config
+    bl = analytic_blocks(potential, u, eta)
+    expected = coupling_fixed_xcart(potential, u, eta, bl, rprimd0)
+    h = 1e-5
+    for nu, (a, b) in enumerate(VOIGT_PAIRS):
+        eps = np.zeros((3, 3)); eps[a, b] += 0.5 * h; eps[b, a] += 0.5 * h
+        fd = (potential.evaluate(xcart, rprimd0 + eps @ rprimd0)[1]
+              - potential.evaluate(xcart, rprimd0 - eps @ rprimd0)[1]) / (2 * h)
+        np.testing.assert_allclose(fd, expected[nu].reshape(-1, 3), atol=1e-5)
+
+
+def test_elastic_affine_matches_energy_fd(potential, config):
+    """Clamped-ion C0 vs second differences of the energy on the affine path.
+
+    Elastic constants are defined at the reference strain (eta = 0); the
+    affine path is xcart -> xcart + eps @ xcart, lattice -> lattice +
+    eps @ lattice (scale_atoms semantics), on which u(eps) = u(I+eps)^T
+    exactly (min-image wrap inactive at these amplitudes).
+    """
+    u, eta, xcart, rprimd0 = config
+    C0, chain = elastic_affine(potential, u, eta)
+    h = 3e-3
+    scale = float(np.abs(C0).max())
+
+    def energy(nu, om, s1, s2):
+        a, b = VOIGT_PAIRS[nu]
+        g, d = VOIGT_PAIRS[om]
+        e = np.zeros((3, 3))
+        e[a, b] += 0.5 * h * s1
+        e[b, a] += 0.5 * h * s1
+        e[g, d] += 0.5 * h * s2
+        e[d, g] += 0.5 * h * s2
+        rp = rprimd0 + e @ rprimd0
+        xc = xcart + (e @ xcart.T).T
+        return potential.evaluate_energy_only(xc, rp)
+
+    for nu in range(6):
+        for om in range(nu, 6):
+            if nu == om:
+                fd = (energy(nu, om, +1, 0) - 2 * energy(nu, om, 0, 0)
+                      + energy(nu, om, -1, 0)) / h ** 2
+            else:
+                fd = (energy(nu, om, +1, +1) - energy(nu, om, +1, -1)
+                      - energy(nu, om, -1, +1) + energy(nu, om, -1, -1)) / (4 * h ** 2)
+            assert abs(C0[nu, om] - fd) < 1e-5 * scale, (nu, om, C0[nu, om], fd)
+
+
+def test_elastic_fixed_u_at_reference_matches_energy_fd(potential):
+    """At u = 0 the affine chain terms vanish, so C0 == elastic_fixed_u.
+
+    Both the Nc * C elastic channel and the fitted pure-strain terms
+    (which carry the ncell-origin sum: prod_disp = ones(ncells)) are
+    checked together against the energy second difference.
+    """
+    xcart = potential.supercell.crystal_sc.xcart
+    rprimd0 = potential._reference_lattice
+    zero_u = np.zeros_like(xcart)
+    bl = analytic_blocks(potential, zero_u, np.zeros((3, 3)))
+    C0, _ = elastic_affine(potential, zero_u, np.zeros((3, 3)))
+    np.testing.assert_allclose(C0, bl.elastic_fixed_u, atol=1e-12)
+
+    h = 1e-3
+    scale = float(np.abs(bl.elastic_fixed_u).max())
+    for nu in range(6):
+        a, b = VOIGT_PAIRS[nu]
+        e = np.zeros((3, 3)); e[a, b] += 0.5 * h; e[b, a] += 0.5 * h
+        rp_p = rprimd0 + e @ rprimd0
+        rp_m = rprimd0 - e @ rprimd0
+        xc_p = xcart + (e @ xcart.T).T
+        xc_m = xcart - (e @ xcart.T).T
+        fd = (potential.evaluate_energy_only(xc_p, rp_p)
+              - 2 * potential.evaluate_energy_only(xcart, rprimd0)
+              + potential.evaluate_energy_only(xc_m, rp_m)) / h ** 2
+        assert abs(C0[nu, nu] - fd) < 1e-5 * scale, (nu, C0[nu, nu], fd)

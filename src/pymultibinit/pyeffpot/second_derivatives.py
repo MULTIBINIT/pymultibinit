@@ -1,359 +1,388 @@
-"""Analytic second-derivative (Hessian) blocks of the polynomial effective potential.
+"""Analytic second-derivative (Hessian) blocks of the effective potential.
 
-Formulas derived from the per-channel first-derivative conventions
-verified against Fortran (Refs/abinit_pymb/src/78_effpot) and atomchain FD
-(see specs/analytic-second-derivatives/research.md)."""
+All quantities in the pyeffpot unit family: Bohr / Hartree. Blocks are exact
+second partial derivatives of the evaluated energy E(u, eta) with u the
+supercell displacement vector (natom_sc, 3) and eta the (3,3) engineering
+strain (Voigt order xx,yy,zz,yz,xz,xy; tensor-shear readback).
+
+Channel prefactors (verified against potential.py evaluators):
+
+    harmonic        E = 1/2 u^T Phi u          -> d2E/du2 = Phi (constant)
+    elastic         E = 1/2 Nc eta^T C eta     -> d2E/deta2 = Nc C
+    internal strain E = 1/2 sum Lambda eta u   -> d2E/deta du = 1/2 Lambda
+    phonon-strain   E = 1/6 sum_a eta_a u^T Phi_a u
+                                                -> d2E/du2 += (1/3) eta_a Phi_a
+                                                -> d2E/deta_a du = (1/3) Phi_a u
+    fitted terms    E = c w prod_f (d_f)^(p_f) prod_s eta_(v_s)^(q_s)
+        exact product rule over ordered factor pairs (powers are small ints)
+
+Note (energy/force asymmetry): `_evaluate_strain_coupling` implements
+forces with prefactor 1/2 while its energy carries 1/6; the exact
+derivative of the evaluated energy is 1/3. The blocks below are exact
+derivatives OF THE ENERGY; FD validation quantifies the evaluator mismatch.
+
+The clamped-ion (affine) elastic constant is assembled by `elastic_affine`:
+under scale_atoms=True homogeneous strain the displacement field transforms
+linearly, u(eta) = (I + eta) u(0) (before min-image wrapping; exact for the
+FD amplitudes used), hence d2u/deta2 = 0 and
+
+    C0[nu, om] = H_etaeta[nu, om]
+               + coupling[nu] . (E^om u) + coupling[om] . (E^nu u)
+               + (E^nu u)^T H_uu (E^om u)
+
+with E^nu the engineering Voigt generators (shear tensor entries = 1/2
+amplitude), matching atomchain ddb/finite_difference.strain_atoms.
+
+`coupling_fixed_xcart` gives the force response to strain at fixed Cartesian
+positions, the object measured by FD of the code's forces at fixed xcart:
+    dF/deta_nu = -coupling[nu] - H_uu @ du_delta_nu
+with du_delta = `_compute_du_delta` (Fortran Eq. A4).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
-import numpy as np
 from typing import Optional, Tuple
+
+import numpy as np
+
+# Voigt order xx, yy, zz, yz, xz, xy -> symmetric tensor (alpha, beta) pairs
+# (same convention as potential._compute_du_delta).
+_VOIGT_PAIRS = ((0, 0), (1, 1), (2, 2), (2, 1), (2, 0), (1, 0))
+
+
+def _engineering_generators() -> np.ndarray:
+    """(6, 3, 3) generators E^nu with shear tensor entries = 1/2 amplitude.
+
+    Matches atomchain finite_difference.strain_atoms: deformation I + eps
+    built with eps[a, b] += eps_voigt / 2 for shear Voigt components.
+    """
+    gens = np.zeros((6, 3, 3), dtype=float)
+    for nu, (a, b) in enumerate(_VOIGT_PAIRS):
+        gens[nu, a, b] += 0.5
+        gens[nu, b, a] += 0.5
+    return gens
 
 
 @dataclass
 class HessianBlocks:
-    """Second-derivative blocks at arbitrary (u, eta).
-    Units: Bohr / Hartree family (IFC: Ha/reduced-equivalent mapped by caller,
-    elastic: Hartree, coupling: Hartree/Bohr, forces: Hartree/Bohr)."""
-    ifc: np.ndarray              # (3*natom_sc, 3*natom_sc) ∂²E/∂u∂u
-    elastic_fixed_u: np.ndarray  # (6, 6) ∂²E/∂η∂η at fixed u
-    coupling: np.ndarray         # (6, 3*natom_sc) ∂²E/∂η∂u
-    forces_at_config: np.ndarray # (natom_sc, 3) ∂E/∂u (for chain-rule elastic)
-    # Affine-path elastic (clamped-ion C⁰) = elastic_fixed_u + chain-rule terms
+    """Exact second partials of E(u, eta) at one configuration (Ha/Bohr).
 
-
-def analytic_blocks(
-    potential,
-    u: np.ndarray,              # (natom_sc, 3) displacements, Bohr
-    eta: np.ndarray,             # (3, 3) engineering strain, dimensionless
-    rprimd: Optional[np.ndarray] = None,
-) -> HessianBlocks:
-    """Analytic second-derivative blocks from EffectivePotential channels.
-
-    The affine-path elastic (C⁰) is assembled separately via
-    `elastic_affine` (see Story 2); this returns the fixed-u elastic,
-    the coupling, and the full phonon IFC.
+    ifc             (3N, 3N) d2E/du du   (supercell force constants)
+    elastic_fixed_u (6, 6)   d2E/deta deta at fixed u (Hartree; the
+                              FD-comparable clamped-ion constant is
+                              `elastic_affine`, not this)
+    coupling        (6, 3N)  d2E/deta du (fixed-u partial derivative)
+    forces          (N, 3)   atomic forces F = -dE/du (Ha/Bohr; directly
+                              comparable to EffectivePotential.evaluate)
+    strain_voigt    (6,)     engineering Voigt strain used
     """
+
+    ifc: np.ndarray
+    elastic_fixed_u: np.ndarray
+    coupling: np.ndarray
+    forces: np.ndarray
+    strain_voigt: np.ndarray
+
+
+def analytic_blocks(potential, u: np.ndarray, eta: np.ndarray,
+                    rprimd: Optional[np.ndarray] = None) -> HessianBlocks:
+    """Exact analytic second-derivative blocks at (u, eta)."""
     sc = potential.supercell
     natom_sc = sc.natom_sc
-    n_targets = 3 * natom_sc
-    # Initialize blocks at zero
-    ifc = np.zeros((n_targets, n_targets), dtype=float)
-    elastic_fu = np.zeros((6, 6), dtype=float)
-    coupling = np.zeros((6, n_targets), dtype=float)
-    forces_config = np.zeros((natom_sc, 3), dtype=float)
-
-    # --- Harmonic IFC (Φ_local + Φ_dipdip) ---
-    # Energy: ½ uᵀ Φ u  => H_uu = Φ (constant). Force: F = -Φ u.
-    if potential._phi_matrix is not None:
-        phi = potential._phi_matrix  # (3N, 3N)
-        ifc += phi.copy()
-        # Also expose harmonic forces for chain-rule (Story 2)
-        u_flat = u.reshape(-1)
-        f_harm_flat = -phi @ u_flat
-        forces_config += f_harm_flat.reshape(natom_sc, 3)
-
-    # --- Harmonic internal strain Λ (Λ · η · u) ---
-    # E = ½ Λ_αμ u_μ η_α  =>  ∂²E/∂u∂u = 0 (first-order in u);
-    #   ∂²E/∂η_α∂u_μ = ½ Λ_αμ; ∂²E/∂η_α∂η_β = 0.
-    unitcell = sc.unitcell
-    lambda_sc = getattr(unitcell, "strain_coupling", None)
-    if lambda_sc is not None:
-        lam = np.asarray(lambda_sc, dtype=float)
-        if lam.shape == (6, 3, unitcell.crystal.natom):  # (6, 3, natom_uc)
-            # Broadcast to supercell by mapping unit-cell atom -> supercell
-            natom_uc = unitcell.crystal.natom
-            # Build per-supercell-atom mapping (simple broadcast: same for every origin)
-            # Per atom, lambda depends only on its unit-cell type.
-            for ia_sc in range(natom_sc):
-                iuc = int(ia_sc % natom_uc)
-                for alpha in range(6):
-                    lam_sc = lam[alpha, :, iuc]  # (3,)
-                    # Coupling: ∂²E/∂η_α∂u_μ = ½ Λ_μ
-                    for mu_idx in range(3):
-                        col = (ia_sc * 3) + mu_idx
-                        coupling[alpha, col] += 0.5 * lam_sc[mu_idx]
-
-    # --- Elastic constants C (N_c · ηᵀ C η) ---
-    # ∂²E/∂η² = N_c C  (independent of u; no coupling contribution).
-    C_uc = getattr(unitcell, "elastic_constants", None)
-    if C_uc is not None:
-        C = np.asarray(C_uc, dtype=float)
-        # Ensure 6x6
-        if C.shape == (6,):
-            # If stored in some single-index convention (not expected), keep as-is
-            pass
-        elif C.shape == (6, 6):
-            elastic_fu += float(sc.ncells) * C
-        else:
-            # Defensive: some older files have 3x3x3x3; skip if unexpected.
-            pass
-
-    # --- Phonon-strain coupling Φ^(α) (strain-phonon IFC channels) ---
-    # ∂²E/∂u∂u with η factor: for each α, H_uu += (1/3) η_α Φ_α
-    # (research table; coefficient 1/3 from energy 1/6 and symmetric u-pair double count).
-    # ∂²E/∂η_α∂u_μ contribution: (1/3) Φ_α u — assembled via the linear term.
-    # ∂²E/∂η_α∂η_β: 0 at linear η order for this channel.
-    # For simplicity (conservative): only contribute to H_uu when η is nonzero,
-    # using Φ_α from potential._phonon_strain_matrices.
-    strain_voigt = potential._strain_to_voigt(eta) if hasattr(potential, "_strain_to_voigt") else eta.flatten()[:6]
-    # Actually eta input is (3,3); convert to voigt
+    u = np.asarray(u, dtype=float)
+    if u.shape != (natom_sc, 3):
+        raise ValueError(f"u has shape {u.shape}, expected {(natom_sc, 3)}")
+    eta = np.asarray(eta, dtype=float)
+    if eta.shape != (3, 3):
+        raise ValueError(f"eta has shape {eta.shape}, expected (3, 3)")
     strain_voigt = np.array([
         eta[0, 0], eta[1, 1], eta[2, 2],
         eta[1, 2] + eta[2, 1],
         eta[2, 0] + eta[0, 2],
         eta[0, 1] + eta[1, 0],
     ], dtype=float)
-    if potential._phonon_strain_matrices is not None:
-        for alpha in range(6):
-            mat = potential._phonon_strain_matrices[alpha]
-            if mat is not None:
-                coef = (strain_voigt[alpha] / 3.0)  # (1/3) factor per energy 1/6
-                # H contribution to ifc (not scaled by N_c; Φ_α is supercell-level already)
-                ifc += coef * mat
-    # Note: the coupling contribution (∂²E/∂η_α∂u_μ = (1/3)Φ_α u) requires
-    # knowledge of u; it is part of the chain-rule affine elastic (Story 2)
-    # rather than the fixed-u Hessian, and is excluded from this `ifc`/`coupling`
-    # blocks by design (FR-004: chain-rule handled in Story 2).
+    ifc = np.zeros((3 * natom_sc, 3 * natom_sc), dtype=float)
+    elastic = np.zeros((6, 6), dtype=float)
+    coupling = np.zeros((6, 3 * natom_sc), dtype=float)
+    forces = np.zeros((natom_sc, 3), dtype=float)
 
-    # --- Anharmonic / fitted polynomial terms (generic per-term Hessian) ---
-    # Energy: Σ_k c_k Π_f (Δu_f)^{p_f} Π_s ε_{v_s}^{q_s}
-    # Where Δu_f = u[a_f] - u[b_f] at supercell origin o.
-    # For each compiled term we compute contributions analytically.
-    # See evaluate_numpy arithmetic (pyeffpot/jax_eval.py:147-210).
-    # For the Hessian we use the same per-origin loop but accumulate
-    # second-derivative products directly.
-    if potential._anharmonic_compiled is not None:
-        compiled = potential._anharmonic_compiled
-        ncells = int(np.prod(potential.supercell.ncell))
-        # Per term: compute diff products once (same as evaluate_numpy)
-        for term_info in compiled:
-            coeff = float(term_info['value']) * float(term_info['weight'])
-            if coeff == 0.0:
-                continue
-            # Strain factor (scalar per origin; same for all origins since η
-            # is uniform; only powers differ — but η is uniform over supercell).
-            strain_mult = 1.0
-            strain_list = term_info.get('strains', []) if isinstance(term_info.get('strains'), list) else []
-            # Handle both list-of-dicts representation and CompiledTerms-style arrays
-            # The potential uses a simpler dict list; compute strain_mult once.
-            for st in strain_list:
-                # st is a dict with 'voigt' and 'power'
-                sv = int(st.get('voigt', st.get('voigt_index', 0)))
-                sp = int(st.get('power', 1))
-                if sv > 0 and sp > 0:
-                    # Convert (3,3) eta -> voigt
-                    sv_idx = sv - 1
-                    strain_mult *= float(strain_voigt[sv_idx]) ** sp
+    _harmonic_blocks(potential, u, ifc, forces)
+    _elastic_blocks(sc, elastic)
+    _internal_strain_blocks(sc, strain_voigt, coupling, forces)
+    _phonon_strain_blocks(potential, u, strain_voigt, ifc, coupling, forces)
+    _fitted_term_blocks(potential, u, strain_voigt, ifc, elastic, coupling, forces)
 
-            # Precompute displacement differences per origin for speed.
-            # The compiled structure varies between CompiledTerms (arrays)
-            # and potential dict; handle both shapes.
-            if hasattr(term_info, 'displacements'):
-                # CompiledTerms-style: arrays with shape (n_disp, ncell, ...)
-                # Not the case for the potential's compiled_terms; fall through.
-                pass
-            else:
-                # Potential-style: list of dicts with idx_a, idx_b arrays over origins
-                # Build (n_disp, ncell) arrays
-                n_disp = len(term_info.get('displacements', []))
-                if n_disp == 0:
-                    continue
-                # Compute differences per displacement factor and accumulate H contributions
-                # We accumulate second-derivative terms in-place via np.add.at.
-                # For each pair of displacement factors (f1, f2), compute:
-                # coefficient = coeff * strain_mult * p_f2 * (p_f1 − 1 if f1==f2 else p_f1)
-                # times product of other displacement factors (power p_other) and other strain factors.
-                # This is the full product-rule Hessian of the term over origins.
-                # To avoid O(F²) loops over atoms for each origin, we accumulate
-                # over origins after computing the coefficient scalar per origin.
+    # exact symmetry by construction; enforce bit-level against scatter drift
+    ifc = 0.5 * (ifc + ifc.T)
 
-                # Read displacement info (potential dict format)
-                # Each element: {'idx_a': (ncells,), 'idx_b': (ncells,), 'dir': int, 'power': int}
-                disp_infos = term_info.get('displacements', [])
-                if not disp_infos:
-                    continue
-                # Calculate the base product of all displacement differences
-                # and then, for each pair (f1, f2), adjust by (p_f2) and
-                # (p_f1 − 1 if f1==f2 else p_f1) multiplied by product over others.
-                # Implementation: loop over f1, f2 (F ≤ ~4, ncells ≤ 64) — acceptable.
-                # Note: using direct loops; could vectorize further but this is the
-                # initial correct version.
-                # FIRST: compute per-origin difference arrays
-                diff_arrs = []  # list of (ncells,) arrays
-                for disp in disp_infos:
-                    if int(disp.get('power', 1)) == 0:
-                        # Zero-power factor is constant 1; skip for second deriv
-                        diff_arrs.append(np.ones(ncells, dtype=float))
-                    else:
-                        ia_all = np.asarray(disp['idx_a'], dtype=int)
-                        ib_all = np.asarray(disp['idx_b'], dtype=int)
-                        d_idx = int(disp['dir'])
-                        # u[a,d] − u[b,d] for each origin cell; origins summed implicitly
-                        # The array 'displacements' passed here is for the supercell.
-                        # We need to index displacements by the supercell indices.
-                        # The potential's compiled terms store supercell indices (0..natom_sc-1)
-                        # so indexing displacements[idx_a, d_idx] is direct.
-                        diff_vals = u_flat.reshape(natom_sc, 3)[ia_all.reshape(-1, ia_all.shape[-2]), d_idx] \
-                            - u_flat.reshape(natom_sc, 3)[ib_all.reshape(-1, ib_all.shape[-2]), d_idx]
-                        # Wait: disp arrays have shape (n_disp, max_factors) in CompiledTerms, not (ncells,).
-                        # The potential's internal representation uses arrays over origins; see potential.py line 737:
-                        # prod_disp *= diff ** power -> diff = displacements[idx_a] - displacements[idx_b] where
-                        # idx_a and idx_b are arrays of length ncells? Actually in potential.py evaluate_anharmonic,
-                        # for term_info['displacements'], the keys use compiled_disp from potential._compile_anharmonic_terms
-                        # which creates dicts 'idx_a', 'idx_b', 'dir', 'power'. The potential's code uses these as arrays over ncells:
-                        # diff = displacements[idx_a, dir] - displacements[idx_b, dir] — that requires idx_a and idx_b
-                        # to be arrays of length ncells (the number of supercell cell origins included in the term).
-                        # Actually in potential.py line 740: diff = displacements[disp['idx_a'], disp['dir']] − displacements[...];
-                        # since displacements is (natom_sc, 3), this implies disp['idx_a'] is a scalar (single supercell atom index) per origin.
-                        # But in the compiled format, each disp factor applies to ALL origins (the supercell atom indices cover origins via cell shifts).
-                        # Actually the potential's compiled terms come from potential._compile_anharmonic_terms (potential.py lines 679-704).
-                        # Let's check exactly what potential._compile_anharmonic_terms produces: it creates 'displacements' with 'idx_a': get_sc_indices(atom_uc, cell) — a 1D array of length ncell (all origins for that atom+cell pair).
-                        # But the evaluation loop (potential.py:737-741) indexes displacements[disp['idx_a'], dir] — since displacements is (natom_sc, 3) and idx_a is an array of length ncell, numpy broadcasts: for each origin cell, it picks displacements[idx_a[origin], dir]. That is: the term is summed over origins (axis=0 implicitly via array broadcasting), not over supercell atoms. So for a term with atom pair (a,b) over cell (0,0), idx_a = [sc_index(at a, origin 0,0) ...] and the difference for each origin is computed separately, then multiplied.
-                        # So diff_vals for a term factor has length = number of origins included (ncell of the supercell = nx*ny*nz), but the potential's evaluation sums them in the product (line 743: prod *= diff ** power, then term_energy = coeff * prod.sum()). So the origin dimension is summed after multiplying all factor products.
-                        # For the Hessian, this means: for each term, compute per-origin second-derivative contributions (a scalar per origin, but actually the second-derivative with respect to supercell atom displacements requires distributing over the origins via indexing array shapes). This is complex for a generic vectorized NumPy implementation without full restructuring of the compiled arrays.
-                        # Given time constraints (user urgency), the correct approach is: compute the Hessian of the ENTIRE supercell configuration (not per-origin separately) using the same arithmetic as evaluate_anharmonic but computing the second derivative of the term's scalar energy (summed over origins) directly.
-                        # For a generic NumPy implementation, the simplest correct path: loop over compiled terms, compute per-origin differences (like evaluate_numpy does), compute the term scalar energy per origin (prod), compute first-derivative arrays per factor (like forces), then the second derivative is the derivative of the first derivative with respect to displacements, summed over origins.
-                        # Given this is substantial algebra, I'll use a simpler but correct approximation: compute the Hessian of each term as the second derivative of the scalar term_energy_total = coeff * strain_mult * sum(prod) with respect to the full supercell displacement vector (u_flat). That means: for each origin, compute local Hessian of the product over factors, then accumulate over origins (weighted by index mapping).
-                        pass  # Skip generic polynomial Hessian in this initial version; rely on fixed-channel blocks.
-    # Given time constraints, the generic polynomial Hessian can be added incrementally.
-    # The core block (ifc, elastic_fixed_u, coupling, forces_at_config) covers the critical contract.
-    # Return the blocks computed so far; generic polynomial contribution to ifc/
-    # coupling can be added as a second pass (the fixed-channel blocks dominate the validation).
-    # Actually the generic polynomial terms contribute to ifc (∂²E_anh/∂u²) and coupling
-    # (∂²E_anh/∂η∂u) and fixed-u elastic (∂²E_anh/∂η², 0 since no pure-strain anharmonic terms in fitted model? Actually fitted terms CAN include strain — but pure-strain terms contribute to elastic; mixed terms contribute to coupling; displacement-only terms contribute to ifc).
-    # To keep the implementation correct and verifiable quickly: compute the anharmonic contribution to the ifc and coupling by treating each term's first-derivative (force) pattern: the second-derivative of a polynomial term w.r.t. displacement is the Jacobian of its forces (already computed in the evaluation loop). The simplest implementation is: evaluate the forces of the term at u, then take numerical finite differences of those forces with a very small h (1e-5) — but that's circular. Instead, compute the analytic second derivative of the product directly per term.
-    # For the scope of this session (user said "Go on run all stories"), the core fixed-channel blocks + wrapper are the load-bearing work. The generic polynomial Hessian is a refinement; I will implement it using the direct second-derivative of the product terms (loop over terms, origin, pair of factors) which is exact and uses the same arrays as evaluate_anharmonic.
-    # Implementing it now.
+    return HessianBlocks(ifc=ifc, elastic_fixed_u=elastic, coupling=coupling,
+                         forces=forces, strain_voigt=strain_voigt)
+
+
+def _harmonic_blocks(potential, u, ifc, forces) -> None:
+    """E = 1/2 u^T Phi u -> d2E/du2 = Phi; dE/du = Phi u."""
+    phi = potential._phi_matrix
+    if phi is None:
+        return
+    ifc += phi
+    forces -= (phi @ u.reshape(-1)).reshape(-1, 3)
+
+
+def _elastic_blocks(sc, elastic) -> None:
+    """E = 1/2 Nc eta^T C eta -> d2E/deta2 = Nc C (no force contribution)."""
+    C = getattr(sc.unitcell, "elastic_constants", None)
+    if C is None:
+        return
+    C = np.asarray(C, dtype=float)
+    if C.shape == (6, 6):
+        elastic += float(sc.ncells) * C
+
+
+def _internal_strain_blocks(sc, strain_voigt, coupling, forces) -> None:
+    """E = 1/2 sum_{alpha,mu,n} Lambda[alpha,mu,n%Nuc] eta_alpha u[n,mu].
+
+    d2E/deta_alpha du[n,mu] = 1/2 Lambda[alpha,mu,n%Nuc]
+    dE/du[n,mu]             = 1/2 sum_alpha Lambda[alpha,mu,n%Nuc] eta_alpha
+    """
+    lam = getattr(sc.unitcell, "strain_coupling", None)
+    if lam is None:
+        return
+    lam = np.asarray(lam, dtype=float)          # (6, 3, natom_uc)
+    natom_uc = sc.unitcell.crystal.natom
+    natom_sc = sc.natom_sc
+    if lam.shape != (6, 3, natom_uc):
+        return
+    iuc = np.arange(natom_sc) % natom_uc        # supercell builder order:
+    # ia_sc = natom_uc * (iz + nz*(iy + ny*ix)) + atom_uc  => iuc = ia_sc % natom_uc
+    lam_sc = lam[:, :, iuc]                     # (6, 3, natom_sc)
+    coupling += 0.5 * lam_sc.transpose(0, 2, 1).reshape(6, 3 * natom_sc)
+    forces -= 0.5 * np.einsum('amn,a->nm', lam_sc, strain_voigt)
+
+
+def _phonon_strain_blocks(potential, u, strain_voigt, ifc, coupling, forces) -> None:
+    """E = 1/6 sum_a eta_a u^T Phi_a u.
+
+    d2E/du2       += (1/3) eta_a Phi_a
+    d2E/deta_a du  = (1/3) Phi_a u   (fixed-u partial)
+    dE/du          = (1/3) eta_a Phi_a u
+    """
+    mats = potential._phonon_strain_matrices
+    if mats is None:
+        return
+    u_flat = u.reshape(-1)
+    for alpha in range(6):
+        mat = mats[alpha]
+        if mat is None:
+            continue
+        ifc += (strain_voigt[alpha] / 3.0) * mat
+        g = (1.0 / 3.0) * (mat @ u_flat)
+        coupling[alpha] += g
+        forces -= (strain_voigt[alpha] * g).reshape(-1, 3)
+
+
+def _pow_guard(x: np.ndarray, n: int) -> np.ndarray:
+    """x**n safe for integer n >= -2 at x == 0 (0**0 = 1, 0**(neg) = 0)."""
+    if n >= 0:
+        return x ** n
+    return np.where(x == 0.0, 0.0, x ** n)
+
+
+def _fitted_term_blocks(potential, u, strain_voigt, ifc, elastic, coupling,
+                        forces) -> None:
+    """Exact product-rule Hessian of the fitted polynomial terms.
+
+    Term energy (potential._evaluate_anharmonic):
+        E = c * S * sum_o prod_f d_f(o)^(p_f),
+        S = prod_s eta_(v_s)^(q_s),
+        d_f(o) = u[idx_a[f,o], dir_f] - u[idx_b[f,o], dir_f].
+
+    Derivatives via the product rule over ORDERED factor pairs (so that two
+    distinct factors acting on the same flat index accumulate both orderings,
+    while a single factor's cross terms are counted once).
+    """
+    compiled = potential._anharmonic_compiled
+    if not compiled:
+        return
+
     for term_info in compiled:
-        coeff_term = float(term_info.get('value', 0)) * float(term_info.get('weight', 1.0))
-        strain_mult_term = 1.0
-        # Read strain info (potential uses list of dicts with 'voigt'/'power')
-        # Handle both dict list and array-style CompiledTerms
-        strains_info = []
-        if 'strains' in term_info:
-            # Potential dict format
-            for s in term_info['strains']:
-                strains_info.append((int(s.get('voigt', s.get('voigt_index', 0))), int(s.get('power', 1))))
-        else:
-            # Array-style CompiledTerms: strain_voigt_idx, strain_power, strain_mask
-            # Not present in potential's internal compiled; skip
-            pass
-        for sv_idx, pw in strains_info:
-            if pw > 0:
-                strain_mult_term *= float(strain_voigt[sv_idx - 1]) ** pw if 'strain_voigt' not in locals() else float(np.array([
-                    eta[0,0], eta[1,1], eta[2,2],
-                    eta[1,2]+eta[2,1], eta[2,0]+eta[0,2], eta[0,1]+eta[1,0]
-                ], dtype=float)[sv_idx-1]) ** pw
-        # Actually: the potential's compiled terms apply strain uniformly; let's compute
-        # strain factor directly from eta (passed as argument in the evaluation, but
-        # the analytic_blocks call passes eta; we need strain_voigt here).
-        # Re-calculate from eta (the function receives eta (3,3) as parameter).
-        # The previous code wasn't accessing strain correctly for the generic part.
-        # Fix: compute strain_voigt inside this block properly.
-        # Actually the simplest robust approach: skip generic polynomial contribution to ifc/coupling/elastic
-        # in the initial working version (the fixed-channel blocks cover the model), and document
-        # that the generic term Hessian is computed separately (Story 1 extension). The user's urgency
-        # demands a working end-to-end API; adding an approximate generic Hessian risks incorrect validation.
-        # The correct approach per the architecture: the generic Hessian must be exact; I'll implement it
-        # using the product-rule directly with loops over origins and factor pairs, ensuring each term's
-        # contribution is assembled exactly.
-        pass
+        c = float(term_info['value']) * float(term_info['weight'])
+        disps = [d for d in term_info['displacements'] if int(d['power']) != 0]
+        strains = [s for s in (term_info.get('strains') or [])
+                   if int(s.get('voigt', 0)) > 0 and int(s.get('power', 0)) > 0]
+        F = len(disps)
+        S = len(strains)
+        if F + S == 0:
+            continue
 
-    # For the initial deliverable, return the fixed-channel blocks only; generic
-    # term Hessian will be added incrementally in a follow-up commit within Story 1.
-    return HessianBlocks(
-        ifc=ifc,
-        elastic_fixed_u=elastic_fu,
-        coupling=coupling,
-        forces_at_config=forces_config,
-    )
-    # Note: generic polynomial contributions to ifc/coupling are intentionally
-    # omitted in this first commit; they will be added with the same exact
+        d_vals, idx_a, idx_b, dirs, pows = [], [], [], [], []
+        for d in disps:
+            ia = np.asarray(d['idx_a'], dtype=int).reshape(-1)
+            ib = np.asarray(d['idx_b'], dtype=int).reshape(-1)
+            mu = int(d['dir'])
+            p = int(d['power'])
+            d_vals.append(u[ia, mu] - u[ib, mu])
+            idx_a.append(ia)
+            idx_b.append(ib)
+            dirs.append(mu)
+            pows.append(p)
+        sv = [int(s['voigt']) - 1 for s in strains]   # 1-based -> 0-based
+        sq = [int(s['power']) for s in strains]
+
+        def prod_others(exclude):
+            out = np.ones_like(d_vals[0]) if F else np.ones(1)
+            for h in range(F):
+                if h not in exclude:
+                    out = out * d_vals[h] ** pows[h]
+            return out
+
+        def s_val(exclude=()):
+            val = 1.0
+            for t in range(S):
+                if t not in exclude:
+                    val *= float(_pow_guard(np.array(strain_voigt[sv[t]]), sq[t]))
+            return val
+
+        def s_dval(k):
+            """d/deta_(v_k) of the strain monomial (per-factor product rule)."""
+            qk = sq[k]
+            if qk == 0:
+                return 0.0
+            ek = strain_voigt[sv[k]]
+            if ek == 0.0 and qk - 1 < 0:
+                return 0.0
+            return qk * float(ek ** (qk - 1)) * s_val((k,))
+
+        prod_all = prod_others(()) if F else np.ones(1)
+        # pure-strain terms (no displacement factors) still sum over the
+        # ncell origins: prod_disp = ones(ncells) in _evaluate_anharmonic.
+        sum_prod = float(prod_all.sum()) if F else float(potential.supercell.ncells)
+
+        # ---- d2E/du du : ordered factor pairs ----
+        for f in range(F):
+            pf = pows[f]
+            for g in range(F):
+                pg = pows[g]
+                if f == g:
+                    if pf < 2:
+                        continue
+                    pref = (c * s_val() * pf * (pf - 1)
+                            * _pow_guard(d_vals[f], pf - 2) * prod_others((f,)))
+                    _scatter_pair(ifc, idx_a[f], idx_b[f], dirs[f],
+                                  idx_a[f], idx_b[f], dirs[f], pref)
+                else:
+                    pref = (c * s_val() * pf * pg
+                            * _pow_guard(d_vals[f], pf - 1)
+                            * _pow_guard(d_vals[g], pg - 1)
+                            * prod_others((f, g)))
+                    _scatter_pair(ifc, idx_a[f], idx_b[f], dirs[f],
+                                  idx_a[g], idx_b[g], dirs[g], pref)
+
+        # ---- d2E/deta du ----
+        for s_idx in range(S):
+            base = c * s_dval(s_idx)
+            if base == 0.0:
+                continue
+            for f in range(F):
+                pf = pows[f]
+                pref = (base * pf * _pow_guard(d_vals[f], pf - 1)
+                        * prod_others((f,)))
+                flat_a = 3 * idx_a[f] + dirs[f]
+                flat_b = 3 * idx_b[f] + dirs[f]
+                np.add.at(coupling[sv[s_idx]], flat_a, pref)
+                np.add.at(coupling[sv[s_idx]], flat_b, -pref)
+
+        # ---- d2E/deta deta ----
+        for s_i in range(S):
+            for s_j in range(S):
+                if s_i == s_j:
+                    q = sq[s_i]
+                    if q < 2:
+                        continue
+                    ek = strain_voigt[sv[s_i]]
+                    if ek == 0.0 and q - 2 < 0:
+                        continue
+                    val = (c * q * (q - 1) * float(ek ** (q - 2))
+                           * s_val((s_i,)) * sum_prod)
+                    elastic[sv[s_i], sv[s_i]] += val
+                else:
+                    di = s_dval(s_i)
+                    dj = s_dval(s_j)
+                    if di == 0.0 or dj == 0.0:
+                        continue
+                    # mixed second derivative removes both factors once
+                    val = (c * sq[s_i] * sq[s_j]
+                           * float(_pow_guard(np.array(strain_voigt[sv[s_i]]), sq[s_i] - 1))
+                           * float(_pow_guard(np.array(strain_voigt[sv[s_j]]), sq[s_j] - 1))
+                           * s_val((s_i, s_j)) * sum_prod)
+                    elastic[sv[s_i], sv[s_j]] += val
+
+        # ---- dE/du (forces): F = -dE/du ----
+        sval = s_val()
+        for f in range(F):
+            pf = pows[f]
+            pref = (c * sval * pf * _pow_guard(d_vals[f], pf - 1)
+                    * prod_others((f,)))
+            flat_a = 3 * idx_a[f] + dirs[f]
+            flat_b = 3 * idx_b[f] + dirs[f]
+            np.add.at(forces.reshape(-1), flat_a, -pref)
+            np.add.at(forces.reshape(-1), flat_b, pref)
+
+
+def _scatter_pair(ifc, ia1, ib1, mu1, ia2, ib2, mu2, pref) -> None:
+    """Scatter pref (ncells,) into the flat Hessian for one ordered pair.
+
+    d = u[a] - u[b] gives second-derivative signs: (+) on (a1,a2) and
+    (b1,b2), (-) on (a1,b2) and (b1,a2). Each ordered pair is written once;
+    the transposed entry comes from the reversed ordered pair.
+    """
+    fa = 3 * ia1 + mu1
+    fb = 3 * ib1 + mu1
+    ga = 3 * ia2 + mu2
+    gb = 3 * ib2 + mu2
+    np.add.at(ifc, (fa, ga), pref)
+    np.add.at(ifc, (fa, gb), -pref)
+    np.add.at(ifc, (fb, ga), -pref)
+    np.add.at(ifc, (fb, gb), pref)
+
 
 def elastic_affine(potential, u: np.ndarray, eta: np.ndarray,
-                   rprimd: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Clamped-ion affine-path elastic (C⁰) = fixed-u elastic + chain-rule terms.
+                   blocks: Optional[HessianBlocks] = None
+                   ) -> Tuple[np.ndarray, np.ndarray]:
+    """Clamped-ion (affine) elastic constant C0 and the chain-rule correction.
 
-    Returns (C_affine 6x6, chain_rule_correction 6x6) per ADR-2. Uses
-    du/dΔ from _compute_du_delta (potential, potential.py) and the
-    second-order chain-rule (Eq. 2 of research memo)."""
-    sc = potential.supercell
-    natom_sc = sc.natom_sc
-    # Fixed-u elastic (already computed in analytic_blocks)
-    blocks = analytic_blocks(potential, u, eta, rprimd=rprimd)
-    C_fixed = blocks.elastic_fixed_u.copy()
-    # Chain-rule correction requires: 2∑∂²E/∂η∂u·du/dη + (du/dη)ᵀ H_uu (du/dη) + ∑ F·d²u/dη²
-    # Compute du/dη (potential's existing method, exact Fortran Eq. A4 parity).
-    du_delta = potential._compute_du_delta(u, eta)  # (6, natom, 3)
-    # First chain term: 2 * coupling.T @ du_delta reshaped
-    # coupling is (6, 3N) from blocks; reshape du_delta -> (3N, 6) for contraction
-    coupling_mat = blocks.coupling.reshape(6, natom_sc * 3)
-    u_flat = u.reshape(-1)  # (3N,)
-    du_flat = du_delta.transpose(1, 2, 0).reshape(3 * natom_sc, 6)  # (3N, 6)
-    # Term 1: 2 * (coupling @ du/deta) -> 6x6 via contraction over 3N
-    # coupling_mat[i, atom_dir_idx] = ∂²E/∂η_i∂u_{dir}
-    # du_flat[atom_dir_idx, j] = ∂u/∂η_j
-    # contraction: C_corr1[i,j] = 2 Σ_{k} coupling[i,k] du_flat[k,j]
-    C_corr1 = 2.0 * (coupling_mat @ du_flat)  # (6, 3N) @ (3N, 6) -> (6,6)
-    # Term 2: (du/deta)ᵀ H_uu (du/deta) -> (6, 3N) @ (3N, 3N) @ (3N, 6)
-    H_uu_flat = blocks.ifc.reshape(6, natom_sc * 3)  # (3N, 3N) kept as flat for matmul
-    # Actually reshape ifc to (3N, 3N)
-    H_uu = blocks.ifc.reshape(3 * natom_sc, 3 * natom_sc)
-    C_corr2 = du_flat.T @ (H_uu @ du_flat)  # (6, 3N) @ (3N, 6) -> (6,6) but du_flat is (3N,6), so:
-    # Correct contraction: C_corr2[i,j] = Σ_{k,l} du[k,i] H[k,l] du[l,j]
-    # That is: du_flat.T (6, 3N) @ H_uu (3N, 3N) @ du_flat (3N, 6) -> (6,6)
-    C_corr2 = du_flat.T @ (H_uu @ du_flat)
-    # Term 3: forces · d²u/dη² (requires d²u/dη²; approximate with FD of du_delta for initial version)
-    # Approximate d²u/dη² ≈ 0 for clamped-ion affine (dominant term is C_corr2; term 3 is second-order in small strain).
-    # This approximation is validated by FD comparison in Story 4.
-    return (C_fixed + C_corr1 + C_corr2), (C_corr1 + C_corr2)
+    C0 = elastic_fixed_u + chain with
+    chain = coupling.E^omega u |_nu + coupling.E^nu u |_omega
+          + (E^nu u)^T ifc (E^omega u)
+    (d2u/deta2 = 0 on the affine path; see module docstring).
+    Returns (C0 (6,6) Hartree, chain (6,6) Hartree).
+    """
+    if blocks is None:
+        blocks = analytic_blocks(potential, u, eta)
+    gens = _engineering_generators()
+    du = np.einsum('nij,aj->nai', gens, u).reshape(6, -1)   # (6, 3N), atom-major flat
+    cd = blocks.coupling @ du.T                             # (6, 6)
+    chain = cd + cd.T + du @ blocks.ifc @ du.T
+    chain = 0.5 * (chain + chain.T)
+    return blocks.elastic_fixed_u + chain, chain
 
-def get_analytic_blocks(potential, atoms) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray]:
-    """ASE-calculator surface: returns (energy_ha, forces_ha_bohr, stress_ha_bohr3, elastic_voigt_evang3)."""
-    xcart_bohr = np.asarray(atoms.get_positions(), dtype=float) * 0.529177210903  # Ang -> Bohr
-    rprimd_bohr = np.asarray(atoms.get_cell(complete=True), dtype=float) * 0.529177210903
-    # Reference displacements: u = current - reference (potential's _compute_displacements)
-    u = potential._compute_displacements(xcart_bohr, rprimd_bohr)
-    eta = potential._compute_strain(rprimd_bohr)
-    blocks = analytic_blocks(potential, u, eta, rprimd=rprimd_bohr)
-    # Unit conversion to ASE convention (eV / Å / Å² / Å³)
-    ang_per_bohr = 0.529177210903
-    ev_per_ha = 27.211386245988
-    # Energy: Hartree -> eV; forces: Ha/Bohr -> eV/Å; stress: Ha/Bohr³ -> eV/Å³
-    # Elastic tensor: fixed-u Hartree -> eV/Å³ (multiply by V_bohr³ then /V_bohr³? No.)
-    # The FD elastic C has units eV/Å³; our elastic_fixed_u is Hartree (energy per unit strain², with N_c factor).
-    # Conversion: 1 Hartree = 27.211 eV. So elastic_fixed_u_eV_ang3 = elastic_fixed_u_ha * ev_per_ha.
-    # But FD stores C * V_bohr³ in Ha; we return fixed-u only (no volume factor applied) per architecture.
-    # The user-facing wrapper applies the convention explicitly.
-    elastic_evang3 = blocks.elastic_fixed_u * ev_per_ha
-    forces_evang = blocks.forces_at_config.reshape(potential.supercell.natom_sc, 3) * ev_per_ha / ang_per_bohr
-    # For simplicity return the core API; full wrapper (Story 3) handles conversion precisely.
-    return 0.0, forces_evang, np.zeros((3, 3)), elastic_evang3
-    # product-rule logic validated against per-channel FD tests.
+def coupling_fixed_xcart(potential, u: np.ndarray, eta: np.ndarray,
+                         blocks: Optional[HessianBlocks] = None,
+                         rprimd: Optional[np.ndarray] = None) -> np.ndarray:
+    """Expected FD of the code's forces w.r.t. strain at fixed xcart (6, 3N).
 
-# ---------------------------------------------------------------------------
-# ASE-compatible wrapper (Story 3 surface; used by Story 4 validation harness)
-# ---------------------------------------------------------------------------
-
-def get_analytic_blocks_ase(potential, atoms):
-    """ASE-compatible surface: returns (energy_eV, forces_eV_A, stress_eV_A3, elastic_eV_A3, coupling_eV_A).
-    Matches the Contributions decomposition convention used by atomchain multibinit_workflow.
-
-    Note: full precision wrapper lives in the MultibinitPotential layer
-    (potential.py) in a follow-up; this exposes the core conversion for
-    rapid FD-consistency smoke-testing."""
-    import numpy as np
-    xcart_bohr = np.asarray(atoms.get_positions(), dtype=float) * 0.529177210903
-    rprimd_bohr = np.asarray(atoms.get_cell(complete=True), dtype=float) * 0.529177210903
-    u = potential._compute_displacements(xcart_bohr, rprimd_bohr)
-    eta = potential._compute_strain(rprimd_bohr)
-    blocks = analytic_blocks(potential, u, eta, rprimd=rprimd_bohr)
-    # Basic unit conversion constants; wrapper-level conversion stays at
-    # potential boundary per architecture ADR-3.
-    ang_per_bohr = 0.529177210903
-    ev_per_ha = 27.211386245988
-    # The elastic_fixed_u already includes N_c factor; return in Hartree family.
-    # The FD-consistency harness compares within-family; ASE-facing
-    # conversion is the Story 3 wrapper responsibility.
-    return float(0.0), np.zeros((potential.supercell.natom_sc, 3)), np.zeros((3, 3)), blocks.elastic_fixed_u.copy(), blocks.coupling.copy()
+    With the Python displacement definition (fixed reference xred, current
+    rprimd, min-image wrap), u(eta) = u(0) - x_ref @ eta^T @ R^T exactly, so
+        du/deta_nu |_xcart = -x_ref @ E_nu @ R^T
+    and
+        dF/deta_nu |_xcart = -coupling[nu] + ifc @ flat(x_ref @ E_nu @ R^T).
+    (The Fortran Eq. A4 `_compute_du_delta` linearizes a different,
+    evaluator-internal displacement frame and is NOT this derivative.)
+    """
+    if blocks is None:
+        blocks = analytic_blocks(potential, u, eta)
+    if rprimd is None:
+        rprimd = potential._reference_lattice
+    xref = potential.supercell.crystal_sc.xred
+    gens = _engineering_generators()
+    du = np.einsum('ni,vij,rj->vnr', xref, gens, rprimd)    # (6, N, 3)
+    return -blocks.coupling + du.reshape(6, -1) @ blocks.ifc

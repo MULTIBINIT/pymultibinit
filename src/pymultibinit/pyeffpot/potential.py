@@ -706,7 +706,7 @@ class EffectivePotential:
     def _evaluate_anharmonic(self, displacements: np.ndarray, strain: np.ndarray, rprimd: Optional[np.ndarray] = None) -> Tuple[float, np.ndarray, np.ndarray]:
         natom = self.supercell.natom_sc
         compiled_terms = self._anharmonic_compiled
-        if compiled_terms is None:
+        if not compiled_terms:
             return 0.0, np.zeros((natom, 3)), np.zeros((3, 3))
 
         if rprimd is None:
