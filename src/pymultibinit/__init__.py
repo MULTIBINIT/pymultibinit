@@ -32,6 +32,7 @@ from .potential import MultibinitPotential
 from .calculator import MultibinitCalculator, Contributions
 from .wrapper_cffi import MultibinitWrapperCFFI
 from .pyeffpot import PhonopyDdbExportResult, write_phonopy_from_ddb
+from .phonon import calculate_analytic_phonon
 
 # Atom matching utilities
 from . import atom_matching
@@ -120,6 +121,7 @@ __all__ = [
     "basis_to_coefficients",
     "build_factor_action_map",
     "build_training_dataset",
+    "calculate_analytic_phonon",
     "canonicalize_monomial_orbit",
     "compute_goal_function",
     "count_fortran_displacement_coefficients",

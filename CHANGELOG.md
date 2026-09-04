@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Exported `Contributions` from the top-level `pymultibinit` package.
   - Only the pure-Python (`pyeffpot`) backend supports decomposition; the
     CFFI (Fortran) and spawned-process backends raise `NotImplementedError`.
+- **Analytic phonopy construction**: Added
+  `calculate_analytic_phonon(atoms, calculator, ...)`, which evaluates the
+  pyeffpot Cartesian Hessian on phonopy's exact supercell atom order and
+  installs it directly as full force constants without finite displacements.
 
 ### Changed
 - **Dependency declaration**: `matplotlib` and `netCDF4` are now declared as

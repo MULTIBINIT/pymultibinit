@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,7 +19,6 @@ import pytest
 from pymultibinit.potential import BOHR_TO_ANGSTROM, HARTREE_TO_EV
 from pymultibinit.pyeffpot.potential import EffectivePotential
 from pymultibinit.pyeffpot.second_derivatives import (
-    HessianBlocks,
     analytic_blocks,
     coupling_fixed_xcart,
     elastic_affine,
@@ -85,8 +85,10 @@ def test_ifc_matches_force_fd(potential, config):
     cols = rng.choice(3 * potential.supercell.natom_sc, size=6, replace=False)
     for c in cols:
         n, mu = divmod(int(c), 3)
-        xp = xcart.copy(); xp[n, mu] += h
-        xm = xcart.copy(); xm[n, mu] -= h
+        xp = xcart.copy()
+        xp[n, mu] += h
+        xm = xcart.copy()
+        xm[n, mu] -= h
         fd = (potential.evaluate(xp, rprimd0)[1]
               - potential.evaluate(xm, rprimd0)[1]) / (2 * h)
         np.testing.assert_allclose(fd, -bl.ifc[:, c].reshape(-1, 3), atol=1e-6)
@@ -103,7 +105,9 @@ def test_coupling_matches_force_fd_fixed_xcart(potential, config):
     expected = coupling_fixed_xcart(potential, u, eta, bl, rprimd0)
     h = 1e-5
     for nu, (a, b) in enumerate(VOIGT_PAIRS):
-        eps = np.zeros((3, 3)); eps[a, b] += 0.5 * h; eps[b, a] += 0.5 * h
+        eps = np.zeros((3, 3))
+        eps[a, b] += 0.5 * h
+        eps[b, a] += 0.5 * h
         fd = (potential.evaluate(xcart, rprimd0 + eps @ rprimd0)[1]
               - potential.evaluate(xcart, rprimd0 - eps @ rprimd0)[1]) / (2 * h)
         np.testing.assert_allclose(fd, expected[nu].reshape(-1, 3), atol=1e-5)
@@ -163,7 +167,9 @@ def test_elastic_fixed_u_at_reference_matches_energy_fd(potential):
     scale = float(np.abs(bl.elastic_fixed_u).max())
     for nu in range(6):
         a, b = VOIGT_PAIRS[nu]
-        e = np.zeros((3, 3)); e[a, b] += 0.5 * h; e[b, a] += 0.5 * h
+        e = np.zeros((3, 3))
+        e[a, b] += 0.5 * h
+        e[b, a] += 0.5 * h
         rp_p = rprimd0 + e @ rprimd0
         rp_m = rprimd0 - e @ rprimd0
         xc_p = xcart + (e @ xcart.T).T
@@ -212,3 +218,112 @@ def u_of(pot, pos_ang, lat_ang):
     eff = pot._pyeffpot_potential
     return eff._compute_displacements(
         pos_ang / BOHR_TO_ANGSTROM, (lat_ang / BOHR_TO_ANGSTROM).T)
+
+
+class _RecordingCalculator:
+    def __init__(self, calculator=None):
+        self.calculator = calculator
+        self.atoms = None
+        self.blocks = None
+
+    def get_analytic_blocks(self, atoms):
+        self.atoms = atoms.copy()
+        if self.calculator is None:
+            n3 = 3 * len(atoms)
+            ifc = np.arange(n3 * n3, dtype=float).reshape(n3, n3)
+            self.blocks = SimpleNamespace(ifc=ifc)
+        else:
+            self.blocks = self.calculator.get_analytic_blocks(atoms)
+        return self.blocks
+
+
+def test_calculate_analytic_phonon_preserves_full_fc_order_and_magmoms():
+    ase = pytest.importorskip("ase")
+    pytest.importorskip("phonopy")
+    from pymultibinit.phonon import calculate_analytic_phonon
+
+    atoms = ase.Atoms(
+        "Fe2",
+        scaled_positions=((0, 0, 0), (0.5, 0.5, 0.5)),
+        cell=np.eye(3) * 3,
+        pbc=True,
+    )
+    atoms.set_initial_magnetic_moments((2.0, -2.0))
+    calculator = _RecordingCalculator()
+    phonon = calculate_analytic_phonon(
+        atoms, calculator, supercell_matrix=np.diag((2, 1, 1))
+    )
+
+    n = len(phonon.supercell)
+    expected = calculator.blocks.ifc.reshape(n, 3, n, 3).transpose(0, 2, 1, 3)
+    assert phonon.force_constants.shape == (n, n, 3, 3)
+    np.testing.assert_array_equal(phonon.force_constants, expected)
+    np.testing.assert_array_equal(
+        calculator.atoms.get_scaled_positions(), phonon.supercell.scaled_positions
+    )
+    np.testing.assert_array_equal(
+        calculator.atoms.get_initial_magnetic_moments(),
+        phonon.supercell.magnetic_moments,
+    )
+
+
+def test_calculate_analytic_phonon_validates_matrices_and_calculator():
+    ase = pytest.importorskip("ase")
+    from pymultibinit.phonon import calculate_analytic_phonon
+
+    atoms = ase.Atoms("H", cell=np.eye(3), pbc=True)
+    with pytest.raises(ValueError, match="supercell_matrix"):
+        calculate_analytic_phonon(atoms, _RecordingCalculator(), np.ones(3))
+    with pytest.raises(ValueError, match="primitive_matrix"):
+        calculate_analytic_phonon(
+            atoms, _RecordingCalculator(), primitive_matrix=np.ones(3)
+        )
+    with pytest.raises(TypeError, match="get_analytic_blocks"):
+        calculate_analytic_phonon(atoms, object())
+
+
+def test_calculate_analytic_phonon_batio3_exact_supercell_blocks(potential):
+    ase = pytest.importorskip("ase")
+    pytest.importorskip("phonopy")
+    from pymultibinit import MultibinitCalculator, calculate_analytic_phonon
+
+    calculator = MultibinitCalculator.from_pyeffpot(
+        ddb_file=os.environ.get("PMB_TEST_DDB", str(DDB)),
+        xml_file=os.environ.get("PMB_TEST_XML", str(XML)),
+        ncell=(2, 2, 2),
+        match_tolerance=0.35,
+    )
+    try:
+        crystal = (
+            calculator.potential._pyeffpot_potential.supercell.unitcell.crystal
+        )
+        numbers = np.rint(crystal.znucl[crystal.typat.astype(int) - 1]).astype(int)
+        atoms = ase.Atoms(
+            numbers=numbers,
+            positions=crystal.xcart * BOHR_TO_ANGSTROM,
+            cell=crystal.rprimd.T * BOHR_TO_ANGSTROM,
+            pbc=True,
+        )
+        atoms.set_masses(crystal.amu[crystal.typat.astype(int) - 1])
+        recording_calculator = _RecordingCalculator(calculator)
+
+        phonon = calculate_analytic_phonon(
+            atoms,
+            recording_calculator,
+            supercell_matrix=np.diag((2, 2, 2)),
+        )
+
+        n = len(phonon.supercell)
+        expected = recording_calculator.blocks.ifc.reshape(
+            n, 3, n, 3
+        ).transpose(0, 2, 1, 3)
+        assert phonon.force_constants.shape == (n, n, 3, 3)
+        np.testing.assert_array_equal(phonon.force_constants, expected)
+        np.testing.assert_allclose(
+            recording_calculator.atoms.get_scaled_positions(),
+            phonon.supercell.scaled_positions,
+            atol=1e-15,
+            rtol=0.0,
+        )
+    finally:
+        calculator.close()
