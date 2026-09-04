@@ -987,11 +987,16 @@ class IfcFitData:
     with ``r_k = vec(K_ref_k - K_fixed_k)`` in canonical eV/Angstrom^2
     atom-major flat order and ``X_kj`` the unit-coefficient IFC columns
     (same units, same order). The channel objective for coefficients ``c``
-    is ``target_norm - 2 c.rhs + c.normal.c`` — no design matrix is stored
-    (streaming accumulation; memory O(ncoeff^2 + (3N)^2)).
+    is ``target_norm - 2 c.rhs + c.normal.c``.
+
+    Backing store: per-target design matrices ``designs`` (ncoeff,
+    (3N_k)^2) in eV/Angstrom^2, from which every normal contraction is
+    computed exactly (``submatrix``/``normal_matvec``/``normal_column``).
+    A dense ``normal`` cache is kept when the builder can afford it
+    (small bases); large bases run design-backed with no O(ncoeff^2)
+    storage.
     """
 
-    normal: np.ndarray
     rhs: np.ndarray
     diagonal: np.ndarray
     target_norm: float
@@ -1001,22 +1006,43 @@ class IfcFitData:
     geo_factors: tuple
     references: tuple            # K_ref_k, (3N_k, 3N_k) eV/Angstrom^2
     fixed: tuple                 # K_fixed_k, same order/units
+    designs: tuple = ()          # per-target (ncoeff, (3N_k)^2) columns
+    normal: object = None        # dense (ncoeff, ncoeff) cache or None
     column_fn: object = None     # callable(target_index, coeff_indices) -> columns
 
     def __post_init__(self) -> None:
-        normal = np.asarray(self.normal, dtype=float)
         rhs = np.asarray(self.rhs, dtype=float)
         diagonal = np.asarray(self.diagonal, dtype=float)
-        if normal.ndim != 2 or normal.shape[0] != normal.shape[1]:
-            raise ValueError("IFC normal must be a square (ncoeff, ncoeff) array")
-        ncoeff = normal.shape[0]
-        if rhs.shape != (ncoeff,) or diagonal.shape != (ncoeff,):
+        ncoeff = rhs.shape[0] if rhs.ndim == 1 else -1
+        if ncoeff < 0 or diagonal.shape != (ncoeff,):
             raise ValueError("IFC rhs/diagonal must have shape (ncoeff,)")
-        if not (np.isfinite(normal).all() and np.isfinite(rhs).all()
-                and np.isfinite(diagonal).all()
+        if self.normal is not None:
+            normal = np.asarray(self.normal, dtype=float)
+            if normal.ndim != 2 or normal.shape[0] != normal.shape[1]:
+                raise ValueError("IFC normal must be a square (ncoeff, ncoeff) array")
+            if normal.shape[0] != ncoeff:
+                raise ValueError("IFC normal must match rhs length")
+            if not np.isfinite(normal).all():
+                raise ValueError("IFC accumulators must be finite")
+            object.__setattr__(self, "normal", normal)
+        designs = tuple(self.designs)
+        for k, design in enumerate(designs):
+            arr = np.asarray(design, dtype=float)
+            if arr.ndim != 2 or arr.shape[0] != ncoeff:
+                raise ValueError(
+                    f"IFC design {k} must have shape (ncoeff, (3N_k)^2); got {arr.shape}")
+            if arr.shape[1] != self.n3s[k] ** 2:
+                raise ValueError(
+                    f"IFC design {k} second dimension must be (3N_k)^2 = "
+                    f"{self.n3s[k] ** 2}; got {arr.shape[1]}")
+            designs = designs[:k] + (arr,) + designs[k + 1:]
+        if self.normal is None and not designs and self.column_fn is None:
+            raise ValueError(
+                "IfcFitData requires designs, a dense normal, or a column_fn")
+        object.__setattr__(self, "designs", designs)
+        if not (np.isfinite(rhs).all() and np.isfinite(diagonal).all()
                 and np.isfinite(float(self.target_norm))):
             raise ValueError("IFC accumulators must be finite")
-        object.__setattr__(self, "normal", normal)
         object.__setattr__(self, "rhs", rhs)
         object.__setattr__(self, "diagonal", diagonal)
         object.__setattr__(self, "target_norm", float(self.target_norm))
@@ -1032,22 +1058,71 @@ class IfcFitData:
     def selected(self, selected) -> "IfcFitData":
         """Column slicing semantics mirroring ``FitFeatureMatrices``."""
         indices = list(selected)
+        designs = (tuple(np.asarray(d)[indices] for d in self.designs)
+                   if self.designs else ())
         return IfcFitData(
-            normal=self.normal[np.ix_(indices, indices)],
             rhs=self.rhs[indices],
             diagonal=self.diagonal[indices],
             target_norm=self.target_norm,
             ids=self.ids, weights=self.weights, n3s=self.n3s,
             geo_factors=self.geo_factors,
             references=self.references, fixed=self.fixed,
+            designs=designs,
+            normal=(self.normal[np.ix_(indices, indices)]
+                    if self.normal is not None else None),
             column_fn=self.column_fn,
         )
+
+    def submatrix(self, indices) -> np.ndarray:
+        """g-weighted normal block ``sum_k g_k X[idx] X[idx].T``."""
+        idx = np.asarray([int(i) for i in indices], dtype=int)
+        if self.designs:
+            out = np.zeros((len(idx), len(idx)), dtype=float)
+            for k, design in enumerate(self.designs):
+                rows = design[idx]
+                out += float(self.geo_factors[k]) * (rows @ rows.T)
+            return out
+        if self.normal is not None:
+            return self.normal[np.ix_(idx, idx)]
+        if self.column_fn is not None:
+            out = np.zeros((len(idx), len(idx)), dtype=float)
+            for k in range(self.n_active):
+                cols = np.asarray(self.column_fn(k, tuple(idx)), dtype=float)
+                flat = cols.reshape(len(idx), -1)
+                out += float(self.geo_factors[k]) * (flat @ flat.T)
+            return out
+        raise ValueError("IfcFitData has no normal provider (designs/normal/column_fn)")
+
+    def normal_matvec(self, v) -> np.ndarray:
+        """``(sum_k g_k X_k X_k^T) @ v`` without materializing the normal."""
+        v = np.asarray(v, dtype=float)
+        if self.designs:
+            out = np.zeros(v.shape[0], dtype=float)
+            for k, design in enumerate(self.designs):
+                out += float(self.geo_factors[k]) * (design @ (design.T @ v))
+            return out
+        return self.submatrix(range(v.shape[0])) @ v
+
+    def normal_column(self, index) -> np.ndarray:
+        """Column ``index`` of the g-weighted normal (ncoeff,)."""
+        index = int(index)
+        if self.designs:
+            out = np.zeros(self.rhs.shape[0], dtype=float)
+            for k, design in enumerate(self.designs):
+                out += float(self.geo_factors[k]) * (design @ design[index])
+            return out
+        unit = np.zeros(self.rhs.shape[0], dtype=float)
+        unit[index] = 1.0
+        return self.normal_matvec(unit)
 
     def goal_ifc(self, coefficients) -> float:
         """Weighted Frobenius objective without the global ifc_factor."""
         coeffs = np.asarray(coefficients, dtype=float)
-        return float(self.target_norm - 2.0 * coeffs @ self.rhs
-                     + coeffs @ self.normal @ coeffs)
+        if self.normal is not None:
+            quad = coeffs @ self.normal @ coeffs
+        else:
+            quad = coeffs @ self.normal_matvec(coeffs)
+        return float(self.target_norm - 2.0 * coeffs @ self.rhs + quad)
 
     def correction(self, target_index: int, coefficients, selected=()) -> np.ndarray:
         """Model IFC correction ``sum_j c_j X_kj`` for one target."""
@@ -1194,13 +1269,12 @@ def build_ifc_fit_data(basis, reference, ddb_path, config: PythonFitConfig,
     if phi is None:
         phi = np.zeros((3 * natom_ref, 3 * natom_ref), dtype=float)
 
-    normal = np.zeros((ncoeff, ncoeff), dtype=float)
     rhs = np.zeros(ncoeff, dtype=float)
     diagonal = np.zeros(ncoeff, dtype=float)
     target_norm = 0.0
     ids, weights, n3s, geo_factors, references, fixed = [], [], [], [], [], []
     states = []
-    chunk = max(1, int(config.feature_chunk_size))
+    designs = []
 
     for target in targets:
         unitcell = target.unitcell
@@ -1252,16 +1326,14 @@ def build_ifc_fit_data(basis, reference, ddb_path, config: PythonFitConfig,
         residual = (np.asarray(target.ifc, dtype=float) - k_fixed_t).reshape(-1)
         geo = float(target.weight) / (n3 * n3 * n_active)
 
-        for start in range(0, ncoeff, chunk):
-            stop = min(start + chunk, ncoeff)
-            cols = _basis_ifc_columns(basis_list, u, strain_voigt, config.ncell,
-                                      natom_uc, indices=range(start, stop),
-                                      unit_factor=HA_BOHR2_TO_EV_ANGSTROM2)
-            flat = cols.reshape(stop - start, -1)
-            normal[np.ix_(range(start, stop), range(start, stop))] += geo * (flat @ flat.T)
-            rhs[start:stop] += geo * (flat @ residual)
-            diagonal[start:stop] += geo * np.einsum("ij,ij->i", flat, flat)
+        cols = _basis_ifc_columns(basis_list, u, strain_voigt, config.ncell,
+                                  natom_uc, indices=None,
+                                  unit_factor=HA_BOHR2_TO_EV_ANGSTROM2)
+        design = np.asarray(cols, dtype=float).reshape(ncoeff, n3 * n3)
+        rhs += geo * (design @ residual)
+        diagonal += geo * np.einsum("ij,ij->i", design, design)
         target_norm += geo * float(residual @ residual)
+        designs.append(design)
 
         ids.append(str(target.id))
         weights.append(float(target.weight))
@@ -1277,11 +1349,20 @@ def build_ifc_fit_data(basis, reference, ddb_path, config: PythonFitConfig,
                                   natom_uc, indices=tuple(coeff_indices),
                                   unit_factor=HA_BOHR2_TO_EV_ANGSTROM2)
 
+    # Dense normal only when affordable (<= 512 MB); the design-backed
+    # submatrix/matvec paths are exact for large bases either way.
+    normal = None
+    if ncoeff <= 8192:
+        normal = np.zeros((ncoeff, ncoeff), dtype=float)
+        for k, design_k in enumerate(designs):
+            normal += float(geo_factors[k]) * (design_k @ design_k.T)
     return IfcFitData(
-        normal=normal, rhs=rhs, diagonal=diagonal, target_norm=target_norm,
+        rhs=rhs, diagonal=diagonal, target_norm=target_norm,
         ids=tuple(ids), weights=tuple(weights), n3s=tuple(n3s),
         geo_factors=tuple(geo_factors),
         references=tuple(references), fixed=tuple(fixed),
+        designs=tuple(designs),
+        normal=normal,
         column_fn=column_fn,
     )
 
@@ -1806,7 +1887,7 @@ def _fit_lasso(features: FitFeatureMatrices, dataset, config: PythonFitConfig, w
             for mat, w2 in zip(mats, w2s):
                 grad += mat.T @ (w2 * (mat @ z))
             if ifc_active:
-                grad += ifc_lam * (ifc_data.normal @ z)
+                grad += ifc_lam * ifc_data.normal_matvec(z)
             nb = z - step * grad
             np.sign(nb, out=nb, where=(np.abs(nb) > thr))
             nb *= np.maximum(np.abs(nb) - thr, 0.0) / np.where(nb != 0, nb, 1.0)
@@ -2050,7 +2131,7 @@ def _greedy_normal_column(features, dataset, config, weights, index: int, cache:
         column += factor * (design.T @ (design[:, index] * row_weights))
 
     if ifc_data is not None and not ifc_data.empty and config.ifc_factor > 0.0:
-        column += config.ifc_factor * ifc_data.normal[:, index]
+        column += config.ifc_factor * ifc_data.normal_column(index)
 
     cache[index] = column
     return column
@@ -2664,7 +2745,7 @@ def _normal_equations(features: FitFeatureMatrices, dataset, config: PythonFitCo
         rhs += factor * (design.T @ (target * row_weights))
 
     if ifc_data is not None and not ifc_data.empty and config.ifc_factor > 0.0:
-        normal += config.ifc_factor * ifc_data.normal
+        normal += config.ifc_factor * ifc_data.submatrix(range(normal.shape[0]))
         rhs += config.ifc_factor * ifc_data.rhs
 
     return normal, rhs

@@ -714,3 +714,50 @@ def test_cli_train_python_passes_ifc_targets_through(tmp_path, monkeypatch):
     loaded = calls["ifc_targets"]
     assert len(loaded) == 1
     assert loaded[0].id == "FORCE_CONSTANTS"
+
+
+# ----------------------------------------------------------------------
+# Regression: design-backed accumulators stay PSD at any basis size
+# (the original chunked normal dropped cross-chunk blocks and the
+#  quadratic form could evaluate negative; see example-10 campaign)
+# ----------------------------------------------------------------------
+
+def test_design_backed_ifc_data_is_exact_and_psd():
+    """goals from designs-only IfcFitData match the explicit residual."""
+    rng = np.random.default_rng(7)
+    ncoeff, n3 = 40, 6
+    geo = 1.0 / (n3 * n3)
+    x = rng.standard_normal((ncoeff, n3, n3)) * 0.3
+    c_star = rng.standard_normal(ncoeff) * 0.1
+    residual = np.einsum("jab,j->ab", x, c_star)  # exactly representable
+    design = x.reshape(ncoeff, n3 * n3)
+    data = IfcFitData(
+        rhs=geo * (design @ residual.reshape(-1)),
+        diagonal=geo * np.einsum("ij,ij->i", design, design),
+        target_norm=geo * float(residual.reshape(-1) @ residual.reshape(-1)),
+        ids=("d",),
+        weights=(1.0,),
+        n3s=(n3,),
+        geo_factors=(geo,),
+        references=(residual,),
+        fixed=(np.zeros((n3, n3)),),
+        designs=(design,),
+        normal=None,
+    )
+    c = rng.standard_normal(ncoeff)
+    quad = data.target_norm - 2.0 * c @ data.rhs + c @ data.normal_matvec(c)
+    explicit = geo * float(np.sum((residual - np.einsum("jab,j->ab", x, c)) ** 2))
+    np.testing.assert_allclose(quad, explicit, rtol=1e-12)
+    assert quad >= -1e-12
+    # goal_ifc, submatrix, and column paths agree with the explicit algebra
+    np.testing.assert_allclose(data.goal_ifc(c), explicit, rtol=1e-12)
+    dense = geo * (design @ design.T)
+    np.testing.assert_allclose(data.submatrix(range(ncoeff)), dense, atol=1e-14)
+    np.testing.assert_allclose(data.normal_column(3), dense[:, 3], atol=1e-14)
+    # slicing keeps the identity
+    sel = (0, 3, 17)
+    sliced = data.selected(sel)
+    c_sel = c[list(sel)]
+    explicit_sel = geo * float(
+        np.sum((residual - np.einsum("jab,j->ab", x[list(sel)], c_sel)) ** 2))
+    np.testing.assert_allclose(sliced.goal_ifc(c_sel), explicit_sel, rtol=1e-12)
