@@ -33,12 +33,50 @@ def calculate_analytic_phonon(
     Its ``(3N, 3N)`` energy Hessian, in eV/Angstrom^2, is installed as full
     ``(N, N, 3, 3)`` force constants without a sign change.
     """
-    supercell_matrix = _matrix_3x3("supercell_matrix", supercell_matrix)
-    primitive_matrix = _matrix_3x3("primitive_matrix", primitive_matrix)
+    phonon, analytic_atoms = build_phonopy(
+        atoms,
+        supercell_matrix=supercell_matrix,
+        primitive_matrix=primitive_matrix,
+        factor=factor,
+        symprec=symprec,
+    )
 
     get_analytic_blocks = getattr(calculator, "get_analytic_blocks", None)
     if not callable(get_analytic_blocks):
         raise TypeError("calculator must provide a callable get_analytic_blocks(atoms)")
+
+    blocks = get_analytic_blocks(analytic_atoms)
+    ifc = np.asarray(getattr(blocks, "ifc", None))
+    natom = len(analytic_atoms)
+    expected_shape = (3 * natom, 3 * natom)
+    if ifc.shape != expected_shape:
+        raise ValueError(
+            "calculator analytic IFC matrix has shape "
+            f"{ifc.shape}; expected {expected_shape} for {natom} atoms"
+        )
+
+    phonon.force_constants = ifc.reshape(natom, 3, natom, 3).transpose(0, 2, 1, 3)
+    return phonon
+
+
+def build_phonopy(
+    atoms: "Atoms",
+    supercell_matrix: Any = np.eye(3),
+    primitive_matrix: Any = np.eye(3),
+    factor: float = VaspToTHz,
+    symprec: float = 1e-5,
+) -> "tuple[Phonopy, Atoms]":
+    """Build the Phonopy skeleton shared by analytic-phonon and IFC targets.
+
+    Constructs unitcell -> Phonopy -> supercell exactly as
+    ``calculate_analytic_phonon`` does and returns ``(phonon, supercell_atoms)``
+    where ``supercell_atoms`` are ASE atoms in phonopy's supercell atom order
+    (numbers/masses/magmoms/scaled_positions preserved). IFC-target generation
+    (``pymultibinit.pyeffpot.ifc_targets``) builds on this helper so generated
+    targets share the identical supercell atom order.
+    """
+    supercell_matrix = _matrix_3x3("supercell_matrix", supercell_matrix)
+    primitive_matrix = _matrix_3x3("primitive_matrix", primitive_matrix)
 
     Phonopy, PhonopyAtoms, ASEAtoms = _import_phonon_dependencies()
     unitcell = PhonopyAtoms(
@@ -68,19 +106,7 @@ def calculate_analytic_phonon(
         analytic_atoms.set_initial_magnetic_moments(
             phonopy_supercell.magnetic_moments
         )
-
-    blocks = get_analytic_blocks(analytic_atoms)
-    ifc = np.asarray(getattr(blocks, "ifc", None))
-    natom = len(phonopy_supercell)
-    expected_shape = (3 * natom, 3 * natom)
-    if ifc.shape != expected_shape:
-        raise ValueError(
-            "calculator analytic IFC matrix has shape "
-            f"{ifc.shape}; expected {expected_shape} for {natom} atoms"
-        )
-
-    phonon.force_constants = ifc.reshape(natom, 3, natom, 3).transpose(0, 2, 1, 3)
-    return phonon
+    return phonon, analytic_atoms
 
 
 def _matrix_3x3(name: str, matrix: Any) -> np.ndarray:
