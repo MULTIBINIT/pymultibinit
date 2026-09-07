@@ -251,11 +251,19 @@ class PythonFitResult:
     hist: str
     basis_xml: str
     selection_steps: tuple[Mapping[str, object], ...] = ()
+    step_coefficients: tuple = ()
     ifc_report: Optional[dict] = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["coefficients"] = self.coefficients.tolist()
+        # ndarray payloads are not JSON-safe; report their shape only
+        data["step_coefficients"] = {
+            "n_steps": len(self.step_coefficients),
+            "n_terms": int(self.step_coefficients[0].shape[0])
+            if self.step_coefficients
+            else 0,
+        }
         return data
 
 
@@ -267,6 +275,7 @@ class GreedySelectionResult:
     coefficients: np.ndarray
     diagnostics: FitDiagnostics
     steps: tuple[Mapping[str, object], ...]
+    step_coefficients: tuple = ()
 
 
 @dataclass(frozen=True, order=True)
@@ -1436,6 +1445,7 @@ def fit_multibinit_model_python(
     )
     validation_dataset = None
     validation_features = None
+    step_coefficients = ()
     if validation_hist is not None:
         validation_path = _existing_path(validation_hist, "validation HIST file")
         validation_frames = read_hist_frames(validation_path)
@@ -1457,6 +1467,7 @@ def fit_multibinit_model_python(
         coefficients = solve.coefficients
         diagnostics = solve.diagnostics
         selection_steps = solve.steps
+        step_coefficients = getattr(solve, "step_coefficients", ())
     elif cfg.selection == "lasso":
         solve = _fit_lasso(features, dataset, cfg, weights=weights, ifc_data=ifc_data)
         coefficients = solve.coefficients
@@ -1484,6 +1495,7 @@ def fit_multibinit_model_python(
         hist=str(hist_path),
         basis_xml=str(basis_path),
         selection_steps=selection_steps,
+        step_coefficients=step_coefficients,
         ifc_report=ifc_report,
     )
 
@@ -1990,6 +2002,8 @@ def _select_greedy_coefficients_large(
     steps = []
     final_result = None
 
+    step_coefficients = []
+
     if selected:
         final_result = _solve_selected_features(features, dataset, config, selected, weights, ifc_data=ifc_data)
         if final_result.diagnostics.info != 0:
@@ -2056,13 +2070,22 @@ def _select_greedy_coefficients_large(
                 final_result.coefficients, validation_features, validation_dataset, selected
             )
         steps.append(step)
+        full = np.zeros(ncoeff_total, dtype=float)
+        full[list(selected)] = final_result.coefficients
+        step_coefficients.append(full)
 
     if final_result is None:
         final_result = _solve_selected_features(features, dataset, config, (), weights)
     coefficients = np.zeros(ncoeff_total, dtype=float)
     if selected:
         coefficients[list(selected)] = final_result.coefficients
-    return GreedySelectionResult(selected=selected, coefficients=coefficients, diagnostics=final_result.diagnostics, steps=tuple(steps))
+    return GreedySelectionResult(
+        selected=selected,
+        coefficients=coefficients,
+        step_coefficients=tuple(step_coefficients),
+        diagnostics=final_result.diagnostics,
+        steps=tuple(steps),
+    )
 
 
 def _greedy_rhs_diagonal_target(features: FitFeatureMatrices, dataset, config: PythonFitConfig, weights, ifc_data: Optional[IfcFitData] = None):
