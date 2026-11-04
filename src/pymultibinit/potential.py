@@ -245,7 +245,8 @@ class MultibinitPotential:
                        match_tolerance: float = 0.1,
                        reference_stress_ha_bohr3: Optional[np.ndarray] = None,
                        standalone_compat: bool = False,
-                       standalone_ifc_file: Optional[str] = None) -> 'MultibinitPotential':
+                       standalone_ifc_file: Optional[str] = None,
+                       dipdip_model: Literal['harmonic', 'geometry'] = 'harmonic') -> 'MultibinitPotential':
         """
         Create potential using pure Python backend (no Fortran dependency).
 
@@ -255,6 +256,8 @@ class MultibinitPotential:
             ncell: Supercell dimensions [nx, ny, nz]
             auto_match_atoms: If True, automatically match atoms on first evaluate()
             match_tolerance: Maximum distance for atom matching (in Angstrom)
+            dipdip_model: 'harmonic' (default) preserves the DDB dipole IFCs;
+                'geometry' adds the geometry-dependent point-dipole correction.
 
         Returns:
             Initialized MultibinitPotential instance with pyeffpot backend
@@ -286,6 +289,7 @@ class MultibinitPotential:
         pot._pyeffpot_potential = EffectivePotential(
             supercell, standalone_compat=standalone_compat,
             standalone_ifc_file=standalone_ifc_file,
+            dipdip_model=dipdip_model,
         )
         pot._znucl = np.asarray(unitcell.znucl, dtype=int).copy()
         pot._typat_ref = np.asarray(unitcell.typat, dtype=int).copy()

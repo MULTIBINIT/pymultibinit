@@ -87,6 +87,10 @@ class HessianBlocks:
 def analytic_blocks(potential, u: np.ndarray, eta: np.ndarray,
                     rprimd: Optional[np.ndarray] = None) -> HessianBlocks:
     """Exact analytic second-derivative blocks at (u, eta)."""
+    if getattr(potential, "dipdip_model", "harmonic") == "geometry":
+        raise NotImplementedError(
+            "analytic Hessian blocks are unavailable for dipdip_model='geometry'"
+        )
     sc = potential.supercell
     natom_sc = sc.natom_sc
     u = np.asarray(u, dtype=float)

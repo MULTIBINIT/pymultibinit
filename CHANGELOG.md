@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Opt-in `dipdip_model="geometry"` for the pure-Python potential and ASE
+  calculator: periodic geometry-dependent point-dipole energy, forces, and
+  stress with the existing harmonic IFC baseline retained. The default remains
+  `dipdip_model="harmonic"`.
+
 ## [0.3.14] - 2026-09-04
 
 ### Added

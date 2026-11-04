@@ -22,7 +22,7 @@ References:
 from __future__ import annotations
 
 import numpy as np
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any, Literal
 from pathlib import Path
 
 from .datastructures import SupercellPotential
@@ -62,13 +62,17 @@ class EffectivePotential:
     """
 
     def __init__(self, supercell: SupercellPotential, standalone_compat: bool = False,
-                 standalone_ifc_file: Optional[str] = None):
+                 standalone_ifc_file: Optional[str] = None,
+                 dipdip_model: Literal["harmonic", "geometry"] = "harmonic"):
         """Initialize effective potential."""
+        if dipdip_model not in ("harmonic", "geometry"):
+            raise ValueError("dipdip_model must be 'harmonic' or 'geometry'")
         self.supercell = supercell
         self._reference_positions = supercell.crystal_sc.xcart.copy()
         self._reference_lattice = supercell.crystal_sc.rprimd.copy()
         self._standalone_compat = standalone_compat
         self._standalone_frame_shifts: Optional[np.ndarray] = None
+        self.dipdip_model = dipdip_model
 
         self._phi_matrix: Optional[np.ndarray] = None
         self._phi_local: Optional[np.ndarray] = None
@@ -111,8 +115,21 @@ class EffectivePotential:
             self._phi_local = phi_local
             self._phi_dipdip = phi_dipdip
             self._phi_matrix = phi_local + (phi_dipdip if phi_dipdip is not None else 0.0)
-        else:
-            self._phi_matrix = None
+        if dipdip_model == "geometry":
+            zeff = supercell.unitcell.zeff
+            epsilon_inf = supercell.unitcell.epsilon_inf
+            if standalone_compat:
+                raise ValueError("dipdip_model='geometry' is unavailable in standalone mode")
+            if (zeff is None or np.linalg.norm(zeff) <= 1e-10
+                    or epsilon_inf is None or self._phi_dipdip is None):
+                raise ValueError(
+                    "dipdip_model='geometry' requires a nonzero Born-charge "
+                    "response and harmonic dipole-dipole IFCs"
+                )
+            natom_uc = supercell.unitcell.crystal.natom
+            self._geometry_zeff = np.asarray(zeff, dtype=float)[
+                np.arange(natom) % natom_uc
+            ]
 
         # Precompute strain coupling matrices
         if hasattr(supercell, 'phonon_strain_sc') and supercell.phonon_strain_sc is not None:
@@ -153,11 +170,12 @@ class EffectivePotential:
     @classmethod
     def from_files(cls, ddb_file: str, xml_file: Optional[str] = None,
                    ncell: Tuple[int, int, int] = (4, 4, 4),
-                    dipdip: bool = True,
-                    asr: bool = True,
-                    reference_stress: Optional[np.ndarray] = None,
-                    standalone_compat: bool = False,
-                    standalone_ifc_file: Optional[str] = None) -> EffectivePotential:
+                   dipdip: bool = True,
+                   asr: bool = True,
+                   reference_stress: Optional[np.ndarray] = None,
+                   standalone_compat: bool = False,
+                   standalone_ifc_file: Optional[str] = None,
+                   dipdip_model: Literal["harmonic", "geometry"] = "harmonic") -> EffectivePotential:
         """
         Create EffectivePotential from DDB and XML files.
 
@@ -172,6 +190,9 @@ class EffectivePotential:
         reference_stress : np.ndarray, optional
             Equilibrium stress tensor (3, 3) in Ha/Bohr^3. Added to all
             stress predictions so the model reproduces absolute stress.
+        dipdip_model : {"harmonic", "geometry"}
+            Use the existing harmonic dipole IFCs or a geometry-dependent
+            correction to that harmonic baseline.
 
         Returns
         -------
@@ -186,7 +207,8 @@ class EffectivePotential:
             supercell.anharmonic_coeffs = coeffs
 
         pot = cls(supercell, standalone_compat=standalone_compat,
-                  standalone_ifc_file=standalone_ifc_file)
+                  standalone_ifc_file=standalone_ifc_file,
+                  dipdip_model=dipdip_model)
         if reference_stress is not None:
             pot.set_reference_stress(reference_stress)
         return pot
@@ -248,6 +270,12 @@ class EffectivePotential:
             energy += e_harm
             forces += f_harm
             stress += s_harm
+        if self.dipdip_model == "geometry":
+            e_geo, f_geo, s_geo = self._evaluate_geometry_dipdip(
+                xcart, rprimd, displacements)
+            energy += e_geo
+            forces += f_geo
+            stress += s_geo
 
         # 5. Elastic energy (if available)
         if self.supercell.unitcell.elastic_constants is not None:
@@ -256,7 +284,8 @@ class EffectivePotential:
             forces += f_elast
             stress += s_elast
 
-        # 6. Dipole-dipole is already included in harmonic IFCs
+        # Dipole-dipole IFCs remain in the harmonic term; geometry mode adds its
+        # current-minus-reference correction above.
 
         # 7. Strain coupling (phonon-strain)
         if hasattr(self.supercell, 'phonon_strain_sc') and self.supercell.phonon_strain_sc is not None:
@@ -299,7 +328,7 @@ class EffectivePotential:
         --------------
         reference        : E_ref = ncells * E0 plus the equilibrium stress.
         harmonic_local   : local (short-range) harmonic IFCs.  [the "(b)" term]
-        dipdip           : dipole-dipole (Ewald long-range) harmonic IFCs.  [the "(a)" term]
+        dipdip           : harmonic Ewald IFCs, plus the geometry correction when selected.
         anharmonic       : anharmonic XML coefficients.  [the "(c)" term]
         elastic          : homogeneous elastic constants (when present).
         strain_coupling  : phonon-strain coupling (when present).
@@ -351,6 +380,11 @@ class EffectivePotential:
                 and self._phi_matrix is not None:
             contributions['harmonic'] = self._evaluate_harmonic_with_phi(
                 self._phi_matrix, displacements, strain, rprimd)
+        if self.dipdip_model == "geometry":
+            e_geo, f_geo, s_geo = self._evaluate_geometry_dipdip(
+                xcart, rprimd, displacements)
+            e_dd, f_dd, s_dd = contributions["dipdip"]
+            contributions["dipdip"] = (e_dd + e_geo, f_dd + f_geo, s_dd + s_geo)
 
         # Elastic constants.
         if self.supercell.unitcell.elastic_constants is not None:
@@ -578,6 +612,28 @@ class EffectivePotential:
         forces = (-phi_matrix @ u).reshape(natom, 3)
         stress = self._finalize_stress(np.zeros(6, dtype=float), forces, displacements, strain, rprimd)
         return energy, forces, stress
+
+    def _evaluate_geometry_dipdip(self, xcart: np.ndarray, rprimd: np.ndarray,
+                                  displacements: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
+        """Add the current dipole Ewald energy relative to fixed reference sites."""
+        from .nonlinear_dipdip import (
+            evaluate_geometry_dipoles,
+            evaluate_geometry_dipoles_components,
+        )
+
+        unitcell = self.supercell.unitcell
+        args = (displacements, self._geometry_zeff, unitcell.epsilon_inf)
+        current = evaluate_geometry_dipoles(xcart, rprimd, *args)
+        reference = evaluate_geometry_dipoles_components(
+            self._reference_positions, self._reference_lattice, *args)
+        # Normalize the fixed-reference displacement chain by current volume.
+        reference_stress = reference[4] * (
+            abs(np.linalg.det(self._reference_lattice)) / abs(np.linalg.det(rprimd)))
+        return (
+            current[0] - reference[0],
+            current[1] - reference[3],
+            current[2] - reference_stress,
+        )
 
     def _evaluate_harmonic(self, displacements: np.ndarray,
                            strain: Optional[np.ndarray] = None,

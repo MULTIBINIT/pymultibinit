@@ -159,6 +159,36 @@ For every term, the mass-weighted residual-force projection (which enforces
 zero net force / translational invariance) is applied to that term alone; since
 it is linear in the forces, the per-term results still sum to the total.
 
+### Geometry-dependent dipole option
+
+The pure-Python constructors also accept `dipdip_model="geometry"`:
+
+```python
+calc = MultibinitCalculator.from_pyeffpot(
+    "system.DDB", ncell=(2, 2, 2), dipdip=True, dipdip_model="geometry"
+)
+```
+
+The default, `"harmonic"`, is unchanged. The geometry option evaluates a
+periodic, dielectric-screened point-dipole Ewald sum at the current positions.
+It uses the reference Born tensors and electronic dielectric tensor, with
+dipoles `p_i = Z_i @ (u_i - mean(u))` and the zero reciprocal mode omitted.
+Forces and stress include the geometry and displacement derivatives.
+
+The `dipdip` contribution is the existing harmonic term plus the difference
+between the current-geometry and reference-geometry dipole energies evaluated
+at the same displacement. This preserves the original harmonic Hessian and
+avoids adding the harmonic response twice. It is a model for nonlinear
+geometry effects, **not exact electronic electrostatics**. Existing fitted
+anharmonic coefficients may already contain these effects; refit or validate
+against first-principles data before using them together. Large displacements
+remain subject to the backend's fractional displacement wrapping.
+
+Geometry mode requires active dipole IFCs and Born/dielectric data, and is not
+available for standalone-compatibility potentials. Analytic Hessian blocks are
+not available in this mode. It evaluates Ewald sums twice per structure and can
+be substantially more expensive than the precomputed harmonic matrix.
+
 ## Backend support
 
 | backend          | decomposition? | notes                                   |

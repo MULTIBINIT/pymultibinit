@@ -1,5 +1,10 @@
 # Dipole–dipole IFCs in `pymultibinit`
 
+> This report describes the default harmonic model. An opt-in
+> `dipdip_model="geometry"` alternative is now available; see
+> [the decomposition guide](docs/ENERGY_FORCE_STRESS_DECOMPOSITION.md#geometry-dependent-dipole-option)
+> for its definition, limitations, and harmonic-baseline correction.
+
 ## Bottom line
 
 `pymultibinit` evaluates dipole–dipole (DD) interactions as a **frozen, harmonic linear-response contribution** to the force-constant matrix. The matrix is built from reference-structure Born effective charges and the high-frequency dielectric tensor, with a periodic Ewald-style lattice sum. Given this matrix, the DD energy is exactly quadratic and its forces exactly linear in the code's displacement coordinates; the routine does **not** recompute dipoles, Born charges, or screening as atoms move. Thus it is exact only for the chosen harmonic point-dipole model (subject to numerical summation cutoffs), not for full material electrostatics or large-amplitude motion.

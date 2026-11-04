@@ -6,7 +6,7 @@ for structure optimization, molecular dynamics, phonon calculations, etc.
 """
 import multiprocessing
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Literal
 
 from ase.calculators.calculator import Calculator, all_changes
 import numpy as np
@@ -370,6 +370,7 @@ class MultibinitCalculator(Calculator):
                       auto_match_atoms: bool = True,
                       match_tolerance: float = 0.1,
                       reference_stress_ha_bohr3: Optional[np.ndarray] = None,
+                      dipdip_model: Literal["harmonic", "geometry"] = "harmonic",
                       **kwargs) -> 'MultibinitCalculator':
         """
         Create a calculator using the **pure Python** backend (no Fortran/libabinit required).
@@ -393,6 +394,8 @@ class MultibinitCalculator(Calculator):
             auto_match_atoms: If True, automatically reorder input atoms to
                 match the MULTIBINIT reference on the first evaluate() call.
             match_tolerance: Tolerance (Angstrom) for atom matching.
+            dipdip_model: "harmonic" (default) preserves DDB dipole IFCs;
+                "geometry" adds the geometry-dependent point-dipole correction.
             reference_stress_ha_bohr3: Optional (3,3) reference stress tensor
                 in Hartree/Bohr^3 to subtract (used for parity tests).
             **kwargs: Additional arguments forwarded to the ASE Calculator base.
@@ -426,6 +429,7 @@ class MultibinitCalculator(Calculator):
             auto_match_atoms=auto_match_atoms,
             match_tolerance=match_tolerance,
             reference_stress_ha_bohr3=reference_stress_ha_bohr3,
+            dipdip_model=dipdip_model,
         )
         return cls(potential=potential, **kwargs)
 
