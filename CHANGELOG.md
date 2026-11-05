@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-11-05
+
 ### Added
 - Opt-in `dipdip_model="geometry"` for the pure-Python potential and ASE
   calculator: periodic geometry-dependent point-dipole energy, forces, and
