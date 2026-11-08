@@ -51,8 +51,13 @@ export LD_LIBRARY_PATH=/path/to/abinit/build/src/98_main:$LD_LIBRARY_PATH
 ### Optional dependencies
 
 ```bash
-pip install pymultibinit[jax]   # JAX acceleration for anharmonic evaluation
+pip install pymultibinit[jax]          # JAX acceleration for anharmonic evaluation
+pip install pymultibinit[longrangefy]  # optional downstream consistency checks
 ```
+
+The `longrangefy` extra is one-way: pymultibinit may import that package in
+`pymultibinit.longrangefy_parity`, never the reverse. Importing and using the
+rest of pymultibinit does not require it.
 
 ## Quick Start
 
@@ -143,6 +148,39 @@ The Python Ewald implementation matches the Fortran `ewald9` kernel:
 reciprocal-space term with dielectric-weighted norm $K_\mu \varepsilon_{\mu\nu} K_\nu$,
 real-space term with anisotropic screened distance, and self-interaction
 correction.
+
+## Downstream longrangefy consistency (optional)
+
+`pymultibinit.longrangefy_parity` compares the q-grid Fourier builder with the
+independent `longrangefy` matched correction. It aligns units, atom/image
+order, phase, Wigner-Seitz weights, ASR policy and the conducting Gamma
+boundary, then reports component-level IFC and energy/force differences. It
+does not declare a parity tolerance: inspect the reported values against your
+own predeclared bound.
+
+```python
+from pymultibinit.longrangefy_parity import compare_matched_correction
+
+report = compare_matched_correction(
+    unitcell,              # pyeffpot UnitcellData with qpoints/dynmat
+    matching_reps=(2, 2, 2),
+    target_reps=(2, 2, 4),
+    accept_measured_symmetry_violation=True,  # records the measured value
+)
+print(report.as_dict()["matrices"])
+```
+
+By default both representations are built from the same downstream-accepted
+Hermitian-projected matching-grid samples (`use_accepted_phi0=True`). Set it
+to `False` to compare raw upstream samples. The unit-constant difference
+(~9e-9 relative) and the recorded projection scale are reported as measured
+floors, not as parity tolerances. Non-orthogonal cells with unequal target
+repetitions are rejected if the upstream builder's atom positions do not
+match the declared image-major tiling.
+
+ASR is reported separately: the downstream matched construction applies no
+acoustic projection, so `asr=True` is a measured difference, not an aligned
+comparison.
 
 ## Energy / Force / Stress Decomposition
 

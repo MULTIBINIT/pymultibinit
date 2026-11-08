@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Optional downstream `longrangefy` consistency harness
+  (`pymultibinit.longrangefy_parity`, extra `pymultibinit[longrangefy]`).
+  Compares the q-grid Fourier builder with the independent matched correction
+  under aligned units, atom/image order, Fourier phase, Wigner-Seitz weights,
+  ASR policy and conducting Gamma boundary; reports component-level IFC and
+  energy/force differences without declaring a parity tolerance. The measured
+  unit-constant floor and the upstream anisotropic-skew position convention
+  are reported explicitly; skewed target cells are refused when their atom
+  order cannot be aligned. Importing pymultibinit does not require
+  longrangefy, and the dependency remains one-way.
+- `build_supercell(..., ewald_eta=..., ewald_nreal=..., ewald_nrecip=...)`
+  exposes the shared Ewald splitting parameter and shell counts. Defaults are
+  unchanged.
+
 ## [0.3.15] - 2026-11-05
 
 ### Added

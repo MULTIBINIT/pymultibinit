@@ -622,6 +622,10 @@ def _build_supercell_ifcs_fourier(
     ncell: Tuple[int, int, int],
     dipdip: bool = True,
     asr: bool = True,
+    *,
+    ewald_eta: Optional[float] = None,
+    ewald_nreal: int = 5,
+    ewald_nrecip: int = 8,
 ) -> IFCData:
     """
     Build supercell IFCs using Fourier transform from q-points.
@@ -645,6 +649,15 @@ def _build_supercell_ifcs_fourier(
         Supercell crystal structure
     ncell : Tuple[int, int, int]
         Supercell dimensions
+    ewald_eta : float, optional
+        Shared Ewald splitting parameter in Bohr**-2 for both the q-grid
+        subtraction and the target-cell Ewald reconstruction. ``None`` keeps
+        the per-cell defaults of ``compute_dipdip_dynmat(s)``. Exposed so
+        downstream consistency checks can align the numerical split instead of
+        comparing two different splitting parameters.
+    ewald_nreal, ewald_nrecip : int
+        Ewald real- and reciprocal-space shell counts, shared by the q-grid
+        subtraction and the target-cell reconstruction.
 
     Returns
     -------
@@ -704,7 +717,10 @@ def _build_supercell_ifcs_fourier(
                   and np.linalg.norm(unitcell.zeff) > 1e-10)
     if has_dipdip:
         from .dipdip import compute_dipdip_dynmats
-        dds = compute_dipdip_dynmats(qpoints=qbz, unitcell=unitcell)
+        dds = compute_dipdip_dynmats(
+            qpoints=qbz, unitcell=unitcell, eta=ewald_eta,
+            nreal=ewald_nreal, nrecip=ewald_nrecip,
+        )
         dynmat_bz[..., 0] -= np.real(dds)
         dynmat_bz[..., 1] -= np.imag(dds)
 
@@ -807,7 +823,10 @@ def _build_supercell_ifcs_fourier(
                         xred=xred, xcart=xred@rprimd_sc.T, typat=unitcell.crystal.typat,
                         amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
                     energy=0.0, epsilon_inf=eps_uc, zeff=zeff_uc)
-                dd = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc_uc))
+                dd = np.real(compute_dipdip_dynmat(
+                    q=np.zeros(3), unitcell=sc_uc, eta=ewald_eta,
+                    nreal=ewald_nreal, nrecip=ewald_nrecip,
+                ))
             else:
                 R_cart = i1*rprimd[0] + i2*rprimd[1] + i3*rprimd[2]
                 x2 = np.vstack([xcart_uc, xcart_uc + R_cart])
@@ -819,7 +838,10 @@ def _build_supercell_ifcs_fourier(
                         typat=np.tile(unitcell.crystal.typat, 2),
                         amu=unitcell.crystal.amu, znucl=unitcell.crystal.znucl),
                     energy=0.0, epsilon_inf=eps_uc, zeff=z2)
-                dd2 = np.real(compute_dipdip_dynmat(q=np.zeros(3), unitcell=sc2))
+                dd2 = np.real(compute_dipdip_dynmat(
+                    q=np.zeros(3), unitcell=sc2, eta=ewald_eta,
+                    nreal=ewald_nreal, nrecip=ewald_nrecip,
+                ))
                 dd = dd2[:natom_uc, :, natom_uc:, :]
             ewald_atmfrc_union[:, :, :, :, irpt_u] = dd
 
@@ -907,6 +929,10 @@ def build_supercell(
     ncell: Tuple[int, int, int],
     dipdip: bool = True,
     asr: bool = True,
+    *,
+    ewald_eta: Optional[float] = None,
+    ewald_nreal: int = 5,
+    ewald_nrecip: int = 8,
 ) -> SupercellPotential:
     """
     Build supercell potential from unitcell data.
@@ -921,6 +947,12 @@ def build_supercell(
         Whether to recompute/add dipole-dipole IFCs when Born charges are available.
     asr : bool
         Whether to enforce the acoustic sum rule when building IFCs.
+    ewald_eta : float, optional
+        Shared Ewald splitting parameter in Bohr**-2 for the q-grid
+        subtraction and the target-cell Ewald reconstruction. ``None`` keeps
+        the per-cell defaults.
+    ewald_nreal, ewald_nrecip : int
+        Shared Ewald real- and reciprocal-space shell counts.
 
     Returns
     -------
@@ -939,7 +971,9 @@ def build_supercell(
 
     if unitcell.qpoints is not None and unitcell.dynmat is not None:
         ifcs_sc = _build_supercell_ifcs_fourier(
-            unitcell, crystal_sc, ncell, dipdip=dipdip, asr=asr
+            unitcell, crystal_sc, ncell, dipdip=dipdip, asr=asr,
+            ewald_eta=ewald_eta, ewald_nreal=ewald_nreal,
+            ewald_nrecip=ewald_nrecip,
         )
     else:
         if unitcell.ifcs is None:

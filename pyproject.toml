@@ -18,11 +18,15 @@ dependencies = [
 ]
 
 # Optional features. Install with ``pip install pymultibinit[jax]``.
-# JAX accelerates anharmonic evaluation and falls back to NumPy if absent, so
-# it is the only optional dependency; everything else above is required.
+# JAX accelerates anharmonic evaluation and falls back to NumPy if absent.
+# ``longrangefy`` enables the downstream consistency harness only; the reverse
+# direction is forbidden and the package works without either extra.
 [project.optional-dependencies]
 jax = [
     "jax>=0.4.0",
+]
+longrangefy = [
+    "longrangefy>=0.1.0",
 ]
 
 [project.scripts]
