@@ -146,10 +146,12 @@ The harmonic interatomic force constants combine two parts in the supercell:
 - **dipdip** (`ewald_atmfrc`): long-range dipole-dipole (Ewald) force constants
   built from the Born effective charges and dielectric tensor.
 
-The decomposition builds two separate force-constant matrices and applies the
-acoustic-sum-rule diagonal correction to each independently. Because the
-correction is linear, the two parts sum **exactly** to the combined
-ASR-corrected harmonic matrix, so:
+With `asr=True`, each matrix receives a full Cartesian onsite correction,
+followed by reciprocal symmetrization and a translation projection. These
+linear operations preserve the split: the two parts sum **exactly** to the
+combined ASR-corrected harmonic matrix. For compatibility, `asr=False` retains
+the evaluator's legacy scalar row-sum correction; it does not disable that
+correction.
 
 ```
 harmonic_local + dipdip == harmonic (combined)

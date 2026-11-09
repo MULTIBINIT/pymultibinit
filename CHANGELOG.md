@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- Correct the harmonic acoustic sum rule for all Cartesian translation
+  components, restoring matched split/unsplit forces at Gamma for anisotropic
+  systems.
 - Normalize DDB and HIST lattice vectors to ABINIT's column convention;
   build anisotropic supercells accordingly and convert to row vectors at
   ASE, Phonopy and dipole Ewald boundaries. Correct the reference strain

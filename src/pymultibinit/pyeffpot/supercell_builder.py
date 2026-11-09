@@ -946,6 +946,7 @@ def build_supercell(
         Whether to recompute/add dipole-dipole IFCs when Born charges are available.
     asr : bool
         Whether to enforce the acoustic sum rule when building IFCs.
+        The evaluator retains its legacy scalar row correction when false.
     ewald_eta : float, optional
         Shared Ewald splitting parameter in Bohr**-2 for the q-grid
         subtraction and the target-cell Ewald reconstruction. ``None`` keeps
@@ -988,7 +989,8 @@ def build_supercell(
         ncell=ncell,
         crystal_sc=crystal_sc,
         ifcs_sc=ifcs_sc,
-        anharmonic_coeffs=None
+        anharmonic_coeffs=None,
+        asr=asr,
     )
 
     return supercell

@@ -255,6 +255,80 @@ class TestSupercellBuilder:
                     expected += (displacements[ib, 0] - displacements[ia, 0]) ** 2
         assert energy == pytest.approx(expected)
 
+    def test_matched_gamma_dipdip_asr_consistency(self):
+        """Matched-Gamma ASR must not split dipdip on/off results.
+
+        On an unshifted Gamma-only q-grid the q-grid subtraction cancels the
+        target-cell reconstruction of the long-range term, so toggling
+        ``dipdip`` cannot change the potential.  With ``asr=True`` the sum
+        rule additionally requires rigid translations to leave energy and
+        forces unchanged.
+        """
+        rprimd = np.diag([7.0, 8.0, 9.0])
+        xred = np.array([[0.10, 0.10, 0.10], [0.39, 0.43, 0.47]])
+        zeff = np.array([
+            [[2.0, 0.4, 0.2], [0.3, 1.8, 0.1], [0.2, 0.1, 2.3]],
+            [[-2.0, -0.4, -0.2], [-0.3, -1.8, -0.1], [-0.2, -0.1, -2.3]],
+        ])
+        epsilon_inf = np.array([[4.0, 0.2, 0.1], [0.2, 5.0, 0.3], [0.1, 0.3, 6.0]])
+        crystal = CrystalInfo(
+            natom=2, ntypat=2, rprimd=rprimd, xred=xred, xcart=xred @ rprimd.T,
+            typat=np.array([1, 2]), amu=np.array([1.0, 2.0]), znucl=np.array([1, 2]),
+        )
+        dynmat = np.zeros((1, 2, 3, 2, 3, 2))
+        dynmat[0, 0, 0, 1, 1, 0] = 0.3
+        dynmat[0, 1, 1, 0, 0, 0] = 0.3
+        unitcell = UnitcellData(
+            crystal=crystal, energy=0.0, epsilon_inf=epsilon_inf, zeff=zeff,
+            qpoints=np.zeros((1, 3)),
+            dynmat=dynmat,
+            ngqpt=np.ones(3, dtype=int), nqshft=1, q1shft=np.zeros((1, 3)),
+            symrel=np.eye(3, dtype=int)[None], tnons=np.zeros((1, 3)),
+        )
+        potentials = {
+            (dipdip, asr): EffectivePotential(
+                build_supercell(unitcell, (1, 1, 1), dipdip=dipdip, asr=asr))
+            for dipdip in (False, True) for asr in (False, True)
+        }
+
+        # Break symmetry: displace one atom along all three Cartesian axes.
+        xcart = crystal.xcart.copy()
+        xcart[0] += np.array([0.020, -0.013, 0.007])
+        results = {
+            key: potential.evaluate(xcart, rprimd)
+            for key, potential in potentials.items()
+        }
+
+        # Matched Gamma: dipdip must be invisible, with or without ASR.
+        for asr in (False, True):
+            e_dipdip, f_dipdip, _ = results[(True, asr)]
+            e_short, f_short, _ = results[(False, asr)]
+            np.testing.assert_allclose(e_dipdip, e_short, rtol=0, atol=1e-9)
+            np.testing.assert_allclose(f_dipdip, f_short, rtol=0, atol=1e-9)
+
+        # ASR: rigid translations leave energy and forces unchanged.
+        for dipdip in (False, True):
+            potential = potentials[(dipdip, True)]
+            e_ref, f_ref, _ = results[(dipdip, True)]
+            for axis in range(3):
+                translated = xcart.copy()
+                translated[:, axis] += 0.04
+                energy, forces, _ = potential.evaluate(translated, rprimd)
+                np.testing.assert_allclose(energy, e_ref, rtol=0, atol=1e-9)
+                np.testing.assert_allclose(forces, f_ref, rtol=0, atol=1e-9)
+            step = 1e-5
+            for atom in range(2):
+                for axis in range(3):
+                    shifted = xcart.copy()
+                    shifted[atom, axis] += step
+                    e_plus = potential.evaluate(shifted, rprimd)[0]
+                    shifted[atom, axis] -= 2 * step
+                    e_minus = potential.evaluate(shifted, rprimd)[0]
+                    np.testing.assert_allclose(
+                        f_ref[atom, axis], -(e_plus - e_minus) / (2 * step),
+                        rtol=0, atol=1e-8,
+                    )
+
     def test_read_ddb_integrates_with_supercell_builder(self):
         """Test exported read_ddb output works with build_supercell."""
         ddb_path = Path(__file__).parent.parent.parent / 'abinit/tests/v9/Input/BTO.DDB'

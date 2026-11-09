@@ -103,15 +103,26 @@ class EffectivePotential:
             phi_dipdip = None
             if ifcs.ewald_atmfrc is not None and np.any(ifcs.ewald_atmfrc):
                 phi_dipdip = ifcs.ewald_atmfrc.sum(axis=4).reshape(3 * natom, 3 * natom)
-                row_sums = phi_dipdip.sum(axis=1)
-                for i in range(3 * natom):
-                    phi_dipdip[i, i] -= row_sums[i]
-            # Apply the acoustic-sum-rule diagonal correction to the local
-            # part. When a dipdip part exists its correction was applied above;
-            # the two corrections are linear and sum to the combined ASR matrix.
-            row_sums = phi_local.sum(axis=1)
-            for i in range(3 * natom):
-                phi_local[i, i] -= row_sums[i]
+            # The onsite block correction is linear, preserving matching of
+            # split and unsplit IFCs. Restore reciprocity and translations
+            # together: symmetrization alone can reintroduce acoustic modes.
+            for phi in (phi_local, phi_dipdip):
+                if phi is None:
+                    continue
+                if not supercell.asr:
+                    row_sums = phi.sum(axis=1)
+                    for i in range(3 * natom):
+                        phi[i, i] -= row_sums[i]
+                    continue
+                blocks = phi.reshape(natom, 3, natom, 3)
+                block_sums = blocks.sum(axis=2)
+                for i in range(natom):
+                    blocks[i, :, i, :] -= block_sums[i]
+                phi[:] = (phi + phi.T) * 0.5
+                block_sums = blocks.sum(axis=2) / natom
+                blocks -= block_sums[:, :, None, :]
+                blocks -= block_sums.transpose(2, 0, 1)[None, :, :, :]
+                blocks += block_sums.mean(axis=0)[None, :, None, :]
             self._phi_local = phi_local
             self._phi_dipdip = phi_dipdip
             self._phi_matrix = phi_local + (phi_dipdip if phi_dipdip is not None else 0.0)

@@ -136,6 +136,7 @@ class SupercellPotential:
     # Anharmonic coefficients (from XML, in unitcell basis)
     # These will be applied during evaluation
     anharmonic_coeffs: Optional[List] = None
+    asr: bool = True                 # ASR requested during supercell construction
     
     @property
     def natom_sc(self) -> int:
