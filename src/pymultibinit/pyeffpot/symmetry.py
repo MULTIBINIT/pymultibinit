@@ -344,8 +344,7 @@ def rotate_dynamical_matrix_full(
         D_ibz = np.conj(D_ibz)
     
     # S_cart = R @ S_frac @ inv(R) where R has lattice vectors in columns.
-    # In this parser, rprimd has vectors in rows, so R = rprimd.T.
-    S_cart = rprimd.T @ symrel.astype(float) @ np.linalg.inv(rprimd.T)
+    S_cart = rprimd @ symrel.astype(float) @ np.linalg.inv(rprimd)
     
     # Compute target q-point for phase factors if not provided
     if q_target is None:
@@ -549,7 +548,7 @@ def expand_zeff_by_symmetry(
                 if filled[ja] and indsym[3, isym, ja] == i:
                     # i = image of ja under S
                     # Z_i = S_cart @ Z_ja @ S_cart.T
-                    S_cart = rprimd.T @ rotations[isym].astype(float) @ np.linalg.inv(rprimd.T)
+                    S_cart = rprimd @ rotations[isym].astype(float) @ np.linalg.inv(rprimd)
                     zeff_out[i, :, :] = S_cart @ zeff_out[ja, :, :] @ S_cart.T
                     filled[i] = True
                     found = True

@@ -600,17 +600,16 @@ def _compute_dipdip_per_rpoint(
             ewald_atmfrc[:, :, :, :, irpt] = ewald_dipole_dipole_for_rpoint(
                 xcart_uc, xcart_uc,
                 epsilon_inf, zeff, zeff,
-                rprimd_sc, volume_sc
+                rprimd_sc.T, volume_sc
             )
         else:
-            R_cart = (cell_shift[0] * rprimd_uc[0] + cell_shift[1] * rprimd_uc[1]
-                      + cell_shift[2] * rprimd_uc[2])
+            R_cart = rprimd_uc @ cell_shift
             xcart_shifted = xcart_uc + R_cart
 
             ewald_atmfrc[:, :, :, :, irpt] = ewald_dipole_dipole_for_rpoint(
                 xcart_uc, xcart_shifted,
                 epsilon_inf, zeff, zeff,
-                rprimd_sc, volume_sc
+                rprimd_sc.T, volume_sc
             )
 
     return ewald_atmfrc
@@ -828,7 +827,7 @@ def _build_supercell_ifcs_fourier(
                     nreal=ewald_nreal, nrecip=ewald_nrecip,
                 ))
             else:
-                R_cart = i1*rprimd[0] + i2*rprimd[1] + i3*rprimd[2]
+                R_cart = rprimd @ np.array([i1, i2, i3])
                 x2 = np.vstack([xcart_uc, xcart_uc + R_cart])
                 z2 = np.vstack([zeff_uc, zeff_uc])
                 xr2 = x2 @ gprimd_sc; xr2 = xr2 - np.floor(xr2)
@@ -1015,7 +1014,7 @@ def _build_supercell_geometry(crystal_uc: CrystalInfo, ncell: Tuple[int, int, in
     natom_uc = crystal_uc.natom
     natom_sc = natom_uc * nx * ny * nz
 
-    rprimd_sc = np.diag(ncell) @ crystal_uc.rprimd
+    rprimd_sc = crystal_uc.rprimd @ np.diag(ncell)
 
     xred_sc = np.zeros((natom_sc, 3))
     typat_sc = np.zeros(natom_sc, dtype=int)
@@ -1126,7 +1125,7 @@ def _compute_dipole_dipole(ifcs_sc: IFCData, unitcell: UnitcellData,
         positions_cart=crystal_sc.xcart,
         epsilon_inf=unitcell.epsilon_inf,
         zeff=zeff_sc,
-        lattice_vectors=crystal_sc.rprimd,
+        lattice_vectors=crystal_sc.rprimd.T,
         use_ewald=True,
     )
 

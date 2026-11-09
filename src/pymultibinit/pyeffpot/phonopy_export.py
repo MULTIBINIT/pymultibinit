@@ -168,7 +168,7 @@ def _unitcell_to_phonopy_atoms(u: UnitcellData, bohr_to_angstrom: float):
         numbers=numbers,
         masses=masses,
         scaled_positions=np.asarray(u.xred, dtype=float),
-        cell=np.asarray(u.rprimd, dtype=float) * bohr_to_angstrom,
+        cell=np.asarray(u.rprimd, dtype=float).T * bohr_to_angstrom,
     )
 
 

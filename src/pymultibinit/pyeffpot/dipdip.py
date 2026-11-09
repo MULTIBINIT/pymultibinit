@@ -607,7 +607,7 @@ def compute_dipdip_dynmat(
         sumg0: if 0, skip G=0 term (for q=0 non-analytic subtraction)
     """
     natom = unitcell.natom
-    rprimd = unitcell.rprimd
+    rprimd = unitcell.rprimd.T
     xcart = unitcell.xcart
     zeff = unitcell.zeff
     epsilon_inf = unitcell.epsilon_inf
@@ -739,7 +739,7 @@ def _ewald_eta(unitcell: UnitcellData, eta: Optional[float]) -> float:
     if eta is not None:
         return eta
 
-    rprimd = unitcell.rprimd
+    rprimd = unitcell.rprimd.T
     rmet = rprimd @ rprimd.T
     gmet_cell = np.linalg.inv(rprimd) @ np.linalg.inv(rprimd).T
     direct = np.sum(rmet)
@@ -865,7 +865,7 @@ def _precompute_dipdip_real_terms(
     nreal: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     natom = unitcell.natom
-    rprimd = unitcell.rprimd
+    rprimd = unitcell.rprimd.T
     xcart = unitcell.xcart
     zeff = unitcell.zeff
     epsilon_inf = unitcell.epsilon_inf
@@ -1011,7 +1011,7 @@ def compute_dipdip_dynmats(
         return np.zeros((len(qpoints), natom, 3, natom, 3), dtype=complex)
 
     eta_val = _ewald_eta(unitcell, eta)
-    rprimd = unitcell.rprimd
+    rprimd = unitcell.rprimd.T
     volume = np.abs(np.linalg.det(rprimd))
     rec_lattice = 2 * np.pi * np.linalg.inv(rprimd).T
     g_indices = _dipdip_g_indices(nrecip)

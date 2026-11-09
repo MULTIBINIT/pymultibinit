@@ -15,7 +15,7 @@ class CrystalInfo:
     """Crystal structure information."""
     natom: int
     ntypat: int
-    rprimd: np.ndarray  # (3, 3) lattice vectors in Bohr
+    rprimd: np.ndarray  # (3, 3) lattice vectors as columns, in Bohr
     xred: np.ndarray    # (natom, 3) reduced coordinates
     xcart: np.ndarray   # (natom, 3) Cartesian coordinates in Bohr
     typat: np.ndarray   # (natom,) atom types

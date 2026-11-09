@@ -213,24 +213,13 @@ def test_asr_difference_is_reported_not_aligned(cubic_unitcell):
 
 @requires_longrangefy
 def test_skew_cell_equal_reps_and_nonuniform_target(skew_unitcell):
-    # Equal repetitions exercise the skew image weights without the upstream
-    # builder's anisotropic-repetition position convention.
     equal = _compare_or_skip(skew_unitcell, (2, 2, 2), (2, 2, 2))
     assert equal.weights["upstream_vs_reference_max_abs"] < 1e-12
     assert equal.matrices["correction"].max_abs < 1e-10
 
-    try:
-        report = compare_matched_correction(
-            skew_unitcell, (2, 2, 2), (2, 2, 4)
-        )
-    except ValueError as exc:
-        # The upstream supercell geometry uses xred_sc @ rprimd_sc.T, which is
-        # not the expected tiling for an anisotropic repetition of a skew
-        # cell.  The harness must refuse rather than compare misaligned atoms.
-        assert "order/positions" in str(exc) or "misaligned" in str(exc)
-        return
+    report = compare_matched_correction(skew_unitcell, (2, 2, 2), (2, 2, 4))
     assert report.weights["upstream_vs_reference_max_abs"] < 1e-12
-    assert np.isfinite(report.matrices["correction"].max_abs)
+    assert report.matrices["correction"].max_abs < 1e-7
     assert report.offgrid["shared_point"]["translation_invariance_residual"] < 1e-10
 
 

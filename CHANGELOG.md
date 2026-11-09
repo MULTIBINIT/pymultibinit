@@ -15,13 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under aligned units, atom/image order, Fourier phase, Wigner-Seitz weights,
   ASR policy and conducting Gamma boundary; reports component-level IFC and
   energy/force differences without declaring a parity tolerance. The measured
-  unit-constant floor and the upstream anisotropic-skew position convention
-  are reported explicitly; skewed target cells are refused when their atom
-  order cannot be aligned. Importing pymultibinit does not require
+  unit-constant floor is reported explicitly; geometries are refused when
+  their atom order cannot be aligned. Importing pymultibinit does not require
   longrangefy, and the dependency remains one-way.
 - `build_supercell(..., ewald_eta=..., ewald_nreal=..., ewald_nrecip=...)`
   exposes the shared Ewald splitting parameter and shell counts. Defaults are
   unchanged.
+
+### Fixed
+- Normalize DDB and HIST lattice vectors to ABINIT's column convention;
+  build anisotropic supercells accordingly and convert to row vectors at
+  ASE, Phonopy and dipole Ewald boundaries. Correct the reference strain
+  and optional longrangefy parity conversions for non-symmetric cells.
 
 ## [0.3.15] - 2026-11-05
 

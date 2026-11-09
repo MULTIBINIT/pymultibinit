@@ -536,16 +536,16 @@ class DDBParser:
         # Unit cell volume and lattice vectors
         acell = np.array(self.data.get('acell', np.ones(3)))
         rprim = np.array(self.data.get('rprim', np.eye(3)))
-        rprimd = np.diag(acell) @ rprim
+        rprimd = (np.diag(acell) @ rprim).T
         ucvol = np.abs(np.linalg.det(rprimd))
 
         # Pre-compute transformation matrices matching ABINIT cart29
-        # In ABINIT, rprimd has vectors in COLUMNS. Here rprimd has vectors in ROWS (A).
+        # rprimd uses ABINIT's column-vector convention.
         # mat_MP (phonon): V_cart = rprimd^-T * V_red
-        # mat_ME (electric field): V_cart = rprimd^T * V_red / (2pi)
+        # mat_ME (electric field): V_cart = rprimd * V_red / (2pi)
         inv_rprimd_T = np.linalg.inv(rprimd).T
         mat_MP = inv_rprimd_T
-        mat_ME = rprimd.T / (2.0 * np.pi)
+        mat_ME = rprimd / (2.0 * np.pi)
 
         # Initialize
         epsilon_inf = np.eye(3)
@@ -729,7 +729,7 @@ class DDBParser:
 
         acell = np.array(self.data.get('acell', np.ones(3)), dtype=float)
         rprim = np.array(self.data.get('rprim', np.eye(3)), dtype=float)
-        rprimd = np.diag(acell) @ rprim
+        rprimd = (np.diag(acell) @ rprim).T
         xred = self.data.get('xred', np.zeros((natom, 3)))
         xcart = xred @ rprimd.T
         typat = np.array(self.data.get('typat', np.zeros(natom, dtype=int)), dtype=int)

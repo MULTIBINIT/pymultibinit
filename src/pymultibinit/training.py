@@ -132,7 +132,8 @@ class TrainingFrame:
 
     Units are exposed via ``units`` and are: ``rprimd``/``xcart`` in Bohr,
     ``xred`` fractional, ``energy`` in Hartree, ``forces`` in Hartree/Bohr,
-    and ``stress`` in Hartree/Bohr^3 with ABINIT Voigt ordering.
+    and ``stress`` in Hartree/Bohr^3 with ABINIT Voigt ordering. Lattice
+    vectors are columns of ``rprimd``.
     """
 
     rprimd: np.ndarray
@@ -377,7 +378,7 @@ def read_hist_frames(filename) -> list[TrainingFrame]:
 
     return [
         TrainingFrame(
-            rprimd=rprimd[iframe],
+            rprimd=rprimd[iframe].T,
             xred=xred[iframe],
             xcart=xcart[iframe],
             energy=float(etotal[iframe]),
@@ -1304,7 +1305,7 @@ def build_ifc_fit_data(basis, reference, ddb_path, config: PythonFitConfig,
                 f"the fit reference supercell has {natom_ref}; the target must "
                 "match the fit supercell (ncell)")
 
-        rprimd_t = np.asarray(supercell_atoms.get_cell().array, dtype=float) * ANGSTROM_TO_BOHR
+        rprimd_t = np.asarray(supercell_atoms.get_cell().array, dtype=float).T * ANGSTROM_TO_BOHR
         xcart_t = np.asarray(supercell_atoms.get_positions(), dtype=float) * ANGSTROM_TO_BOHR
         xred_t = np.asarray(supercell_atoms.get_scaled_positions(), dtype=float)
 
@@ -2663,7 +2664,7 @@ def _engineering_strain(rprimd: np.ndarray, inv_ref_rprimd: np.ndarray) -> np.nd
     """Compute engineering (Biot-like) strain matching MULTIBINIT convention.
 
     Fortran reference: m_fit_data.F90 strain_get call + Voigt extraction.
-    Formula: eta = h_def @ h_ref^{-T} - I  (same as strain_get in m_strain.F90).
+    Formula: eta = h_def @ h_ref^{-1} - I (same as strain_get in m_strain.F90).
     """
     deformation = rprimd @ inv_ref_rprimd
     return deformation - np.eye(3)

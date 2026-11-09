@@ -44,11 +44,11 @@ def write_ddb(filename: str, unitcell: UnitcellData):
     lines.append("")
     
     # Lattice
-    acell = unitcell.acell if unitcell.acell is not None else np.diag(crystal.rprimd)
+    acell = unitcell.acell if unitcell.acell is not None else np.ones(3)
     lines.append(f" acell   {acell[0]:.14E}  {acell[1]:.14E}  {acell[2]:.14E}")
     
     # rprim
-    rprim = crystal.rprimd / acell[:, np.newaxis] if unitcell.acell is not None else crystal.rprimd
+    rprim = crystal.rprimd.T / acell[:, np.newaxis]
     lines.append(f" rprim   {rprim[0,0]:.14E}  {rprim[0,1]:.14E}  {rprim[0,2]:.14E}")
     lines.append(f"         {rprim[1,0]:.14E}  {rprim[1,1]:.14E}  {rprim[1,2]:.14E}")
     lines.append(f"         {rprim[2,0]:.14E}  {rprim[2,1]:.14E}  {rprim[2,2]:.14E}")

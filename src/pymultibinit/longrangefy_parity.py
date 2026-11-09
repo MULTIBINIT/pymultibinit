@@ -521,7 +521,7 @@ def _geometry_alignment(unitcell: UnitcellData) -> Dict[str, Any]:
             "the upstream builder phase-shifts by these translations while the "
             "downstream site order does not, so target image assignments differ"
         )
-    transposed = np.asarray(unitcell.xred) @ np.asarray(unitcell.rprimd)
+    transposed = np.asarray(unitcell.xred) @ np.asarray(unitcell.rprimd).T
     transpose_residual = float(
         np.abs(np.asarray(unitcell.xcart) - transposed).max()
     ) * BOHR_TO_ANGSTROM
@@ -530,7 +530,7 @@ def _geometry_alignment(unitcell: UnitcellData) -> Dict[str, Any]:
         "canonical_translation_max_angstrom": phase_max * BOHR_TO_ANGSTROM,
         "xcart_transpose_residual_angstrom": transpose_residual,
         "positions_source": "unitcell.xcart (the positions used by dipdip)",
-        "cell_source": "unitcell.rprimd rows",
+        "cell_source": "unitcell.rprimd columns, transposed to rows",
     }
 
 
@@ -555,7 +555,7 @@ def _ordering_residual(
                     index += 1
     actual = np.asarray(crystal_sc.xcart, dtype=float)
     # xcart = xred @ rprimd.T, so the position-space lattice matrix is rprimd.T.
-    cell_sc = np.diag(target_reps).astype(float) @ cell
+    cell_sc = cell @ np.diag(target_reps).astype(float)
     cell_pos = cell_sc.T
     delta = expected - actual
     frac = delta @ np.linalg.inv(cell_pos)
@@ -600,7 +600,7 @@ def build_downstream_correction(
     aligned, dynmat, qbz, grid_h = _full_grid_data(unitcell, reps_m)
     geometry = _geometry_alignment(unitcell)
 
-    cell = np.asarray(unitcell.rprimd, dtype=float) * BOHR_TO_ANGSTROM
+    cell = np.asarray(unitcell.rprimd, dtype=float).T * BOHR_TO_ANGSTROM
     positions = np.asarray(unitcell.xcart, dtype=float) * BOHR_TO_ANGSTROM
     born = np.asarray(unitcell.zeff, dtype=float)
     dielectric = np.asarray(unitcell.epsilon_inf, dtype=float)
@@ -1220,9 +1220,9 @@ def compare_matched_correction(
             else "per-cell dipdip defaults"
         ),
         "upstream_default_etas_bohr2": {
-            "q_grid_subtraction": _default_eta(np.asarray(unitcell.rprimd, dtype=float)),
+            "q_grid_subtraction": _default_eta(np.asarray(unitcell.rprimd, dtype=float).T),
             "target_ewald": _default_eta(
-                np.diag(reps_l).astype(float) @ np.asarray(unitcell.rprimd, dtype=float)
+                np.diag(reps_l).astype(float) @ np.asarray(unitcell.rprimd, dtype=float).T
             ),
         },
         "downstream_eta_angstrom2": downstream.eta_angstrom2,

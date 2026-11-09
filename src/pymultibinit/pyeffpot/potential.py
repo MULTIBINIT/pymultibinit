@@ -520,7 +520,7 @@ class EffectivePotential:
         Compute engineering (Biot-like) strain matching the MULTIBINIT/Fortran convention.
 
         Fortran reference: strain_get() in m_strain.F90 via fit_data_compute in m_fit_data.F90.
-        Formula: eta = h_def @ h_ref^{-T} - I
+        Formula: eta = h_def @ h_ref^{-1} - I
         where h_def = rprimd (deformed), h_ref = reference lattice.
 
         Parameters
@@ -531,12 +531,9 @@ class EffectivePotential:
         Returns
         -------
         np.ndarray
-            Engineering strain tensor eta = h_def @ h_ref^{-T} - I.
+            Engineering strain tensor eta = h_def @ h_ref^{-1} - I.
         """
-        # Deformation gradient relative to reference: h = rprimd @ inv(rprimd_ref)^T
-        # Fortran: mat_delta = matmul(rprim_def, transpose(rprim_inv)) - identity
-        # where rprim_inv = inv(rprimd_ref)
-        h = rprimd @ np.linalg.inv(self._reference_lattice).T
+        h = rprimd @ np.linalg.inv(self._reference_lattice)
         strain = h - np.eye(3)
         return strain
 
